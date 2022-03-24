@@ -7,9 +7,8 @@ use bdk::database::MemoryDatabase;
 use bdk::wallet::AddressIndex::New;
 use bitcoin::Network;
 
-#[get("/gen_new_address")]
-fn gen_new_address() -> String {
-    let descriptor = "wpkh(tpubD6NzVbkrYhZ4Xferm7Pz4VnjdcDPFyjVu5K4iZXQ4pVN8Cks4pHVowTBXBKRhX64pkRyJZJN5xAKj4UDNnLPb5p2sSKXhewoYx5GbTdUFWq/*)";
+#[get("/gen_new_address/<descriptor>")]
+fn gen_new_address(descriptor: &str) -> String {
     let wallet = Wallet::new(
         descriptor,
         None,
@@ -23,7 +22,7 @@ fn gen_new_address() -> String {
 
 #[get("/")]
 fn index() -> &'static str {
-    "Hello, world!"
+    "Root service not implemented"
 }
 
 #[launch]
