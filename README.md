@@ -7,7 +7,7 @@ cargo run
 ```
 curl http://localhost:8000/gen_new_address
 ```
-[ ] Pass output descriptor as a parameter
+[] Pass output descriptor as a parameter
 
 ### Result
 ```
