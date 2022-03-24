@@ -9,14 +9,24 @@ use bitcoin::Network;
 
 #[get("/gen_new_address/<descriptor>")]
 fn gen_new_address(descriptor: &str) -> String {
+
+    // create a new wallet from the descriptor string
     let wallet = Wallet::new(
         descriptor,
+        // TODO: parameterize change_descriptor
         None,
+        // TODO: parameterize testnet vs mainnet vs regtest
         Network::Testnet,
         MemoryDatabase::default(),
     ).unwrap();
-    // wallet.add_address_validator(Arc::new(PrintAddressAndContinue));
+
+    // TODO: this is always the "first" address; to get the "next" address,
+    // we'll need to check to loop through addresses to check for an existing UTXO (bitcoin balance).
+    // In order to check the balance, we'll need to connect to a bitcoin node.
+    // The paramter to `get_address` is an `AddressIndex` - maybe this allows for a "next" option.
     let address = wallet.get_address(New).unwrap();
+
+    // return the address as an http request
     address.to_string().into()
 }
 
