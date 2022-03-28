@@ -30,22 +30,22 @@ fn gen_new_address(descriptor: &str) -> String {
     address.to_string().into()
 }
 
-#[get("/gen_output_descriptor")]
-fn gen_output_descriptor(_threshold: u32, _xpubs: [String; 15]) -> String {
+// #[get("/gen_output_descriptor")]
+// fn gen_output_descriptor(_threshold: u32, _xpubs: [String; 15]) -> String {
 
-    // input is a list of xpubs and the multisig threshold
-    // output is the properly formatted output descriptor
-    return String::from("")
-}
+//     // input is a list of xpubs and the multisig threshold
+//     // output is the properly formatted output descriptor
+//     return String::from("")
+// }
 
-#[get("/get_balance")]
-fn get_balance(descriptor: &str) -> u32 {
+// #[get("/get_balance")]
+// fn get_balance(descriptor: &str) -> u32 {
 
-    // get balance by querying the bitcoin node
-    // return balance in sats
+//     // get balance by querying the bitcoin node
+//     // return balance in sats
 
-    return 0
-}
+//     return 0
+// }
 
 #[get("/")]
 fn index() -> &'static str {
@@ -54,5 +54,5 @@ fn index() -> &'static str {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build().mount("/", routes![index, gen_new_address, gen_output_descriptor, get_balance])
+    rocket::build().mount("/", routes![index, gen_new_address])
 }
