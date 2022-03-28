@@ -30,6 +30,23 @@ fn gen_new_address(descriptor: &str) -> String {
     address.to_string().into()
 }
 
+#[get("/gen_output_descriptor")]
+fn gen_output_descriptor(threshold: u8, xpubs: [$str]) -> String {
+
+    // input is a list of xpubs and the multisig threshold
+    // output is the properly formatted output descriptor
+    return String::from("")
+}
+
+#[get("/get_balance")]
+fn get_balance(descriptor: $str) -> u32 {
+
+    // get balance by querying the bitcoin node
+    // return balance in sats
+
+    return 0
+}
+
 #[get("/")]
 fn index() -> &'static str {
     "Root service not implemented"
