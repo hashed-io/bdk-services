@@ -18,3 +18,20 @@ curl http://localhost:8000/gen_new_address/wpkh%28tpubD6NzVbkrYhZ4Xferm7Pz4Vnjdc
 ```
 tb1q7vzm6vyj493davdun6m52j3fdjxkpshar7jlur
 ```
+
+
+curl -X POST http://localhost:8080/create-basic -H "Content-Type: application/json" -d '{ 
+    "email": 1, 
+    "address": { 
+        "street": "warpstreet", 
+        "street_no": 1 
+    }, 
+    "pets": [{ 
+        "name": "nacho" 
+    }]
+}'
+
+curl -X POST http://localhost:8000/todo -d '{ 
+    "complete": "false", 
+    "description": "here is my task description"
+}'
