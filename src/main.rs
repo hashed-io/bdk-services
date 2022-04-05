@@ -14,19 +14,20 @@ extern crate rocket;
 //     xpubs: u32,
 // }
 
-use rocket::request::Form;
+use serde::Deserialize;
+use rocket_contrib::json::Json;
 
-#[derive(FromForm)]
-struct Task {
-    complete: String,
-    description: String,
-}
+// #[derive(FromForm)]
+// struct Task {
+//     complete: String,
+//     description: String,
+// }
 
-#[post("/todo", data = "<task>")]
-fn todo(task: Form<Task>) { 
-    println!("{:?}", task.description);
-    println!("{:?}", task.complete);
-}
+// #[post("/todo", data = "<task>")]
+// fn todo(task: Form<Task>) { 
+//     println!("{:?}", task.description);
+//     println!("{:?}", task.complete);
+// }
 
 
 // #[get("/gen_new_address/<descriptor>")]
@@ -85,13 +86,23 @@ fn echo_fn(echo: String) -> String {
     format!("{}", echo)
 }
 
+#[derive(Deserialize)]
+struct MyParam {
+    value: String
+}
+
 #[post("/echo-post/<echo>")]
 fn echo_post(echo: String) -> String {
     format!("{}", echo)
 }
 
+#[post("/submit", format= "application/json", data = "<user_input>")]
+fn submit_task(user_input: Json<MyParam>) -> String {
+    format!("Your value: {:?}", user_input.value)
+}
+
 fn main() {
-    rocket::ignite().mount("/", routes![echo_fn, echo_post, todo]).launch();
+    rocket::ignite().mount("/", routes![echo_fn, echo_post, submit_task]).launch();
 }
 
 

@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 rocket = "0.4.10"
+rocket_contrib = "0.4.10"
 bdk = "0.17.0"
+serde = "1.0.136"
