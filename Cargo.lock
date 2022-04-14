@@ -85,6 +85,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
+
+[[package]]
 name = "base64-compat"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -128,8 +134,12 @@ dependencies = [
 name = "bdk-services"
 version = "0.1.0"
 dependencies = [
+ "base64 0.13.0",
  "bdk",
+ "bitcoin",
  "rocket",
+ "serde",
+ "xyzpub",
 ]
 
 [[package]]
@@ -1071,6 +1081,7 @@ dependencies = [
  "rocket_codegen",
  "rocket_http",
  "serde",
+ "serde_json",
  "state",
  "tempfile",
  "time",
@@ -1141,7 +1152,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b25a18b1bf7387f0145e7f8324e700805aade3842dd3db2e74e4cdeb4677c09e"
 dependencies = [
- "base64",
+ "base64 0.10.1",
  "log",
  "ring",
  "sct",
@@ -1796,6 +1807,15 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "xyzpub"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "759fa9c804e43c900100190878fcdf2568a5c159ad02508677e6c05bd50dc4db"
+dependencies = [
+ "bitcoin",
+]
 
 [[package]]
 name = "yansi"
