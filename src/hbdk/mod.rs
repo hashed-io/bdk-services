@@ -5,7 +5,7 @@ use bdk::blockchain::ElectrumBlockchain;
 use bdk::database::MemoryDatabase;
 use bdk::electrum_client::Client;
 use bdk::wallet::export::WalletExport;
-use bdk::wallet::AddressIndex;
+use bdk::wallet::{AddressInfo, AddressIndex};
 use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::util::psbt::PartiallySignedTransaction;
@@ -76,7 +76,23 @@ impl Multisig {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Descriptors {
   pub descriptor: String,
-  pub change_descriptor: String,
+  pub change_descriptor: Option<String>,
+}
+
+impl Descriptors {
+  pub fn new(descriptor: String, change_descriptor: String) -> Descriptors {
+    Descriptors {
+      descriptor,
+      change_descriptor: Some(change_descriptor)
+    }
+  }
+
+  pub fn from_descriptor(descriptor: String) -> Descriptors {
+    Descriptors {
+      descriptor,
+      change_descriptor: None,
+    }
+  }
 }
 
 pub struct Blockchain {
@@ -92,6 +108,10 @@ impl Blockchain {
       network,
     });
   }
+
+  pub fn get_blockchain(&self) -> &ElectrumBlockchain {
+    &self.blockchain
+  }
 }
 
 pub struct Wallet {
@@ -100,29 +120,36 @@ pub struct Wallet {
 }
 
 impl Wallet {
+
+  pub fn new(
+    url: &str,
+    network: Network,
+    descriptors: &Descriptors
+  ) -> Result<Self, Error> {
+    Self::from_descriptors(Blockchain::new(url, network)?, descriptors)
+  }
+
   pub fn from_multisig(blockchain: Blockchain, multisig: &Multisig) -> Result<Self, Error> {
     Self::from_descriptors(
       blockchain,
-      &multisig.descriptor(false)?,
-      &multisig.descriptor(true)?,
+      &Descriptors::new(multisig.descriptor(false)?, multisig.descriptor(true)?)
     )
   }
 
   pub fn from_descriptors(
     blockchain: Blockchain,
-    descriptor: &str,
-    change_descriptor: &str,
+    descriptors: &Descriptors
   ) -> Result<Self, Error> {
     let network = blockchain.network.clone();
-    return Ok(Wallet {
+    Ok(Wallet {
       blockchain,
       wallet: bdk::Wallet::new(
-        descriptor,
-        Some(change_descriptor),
+        &descriptors.descriptor,
+        descriptors.change_descriptor.as_ref(),
         network,
         MemoryDatabase::default(),
       )?,
-    });
+    })
   }
 
   pub fn get_descriptors(&self) -> Result<Descriptors, Error> {
@@ -132,14 +159,23 @@ impl Wallet {
       .ok_or(bdk::Error::Generic("No descriptor for wallet".to_string()))?;
     let change_descriptor = self
       .wallet
-      .public_descriptor(KeychainKind::Internal)?
-      .ok_or(bdk::Error::Generic(
-        "No change descriptor for wallet".to_string(),
-      ))?;
+      .public_descriptor(KeychainKind::Internal)?;
+    let change_descriptor = change_descriptor.map(|desc|desc.to_string());
     return Ok(Descriptors {
-      descriptor: format!("{}", descriptor),
-      change_descriptor: format!("{}", change_descriptor),
+      descriptor: descriptor.to_string(),
+      change_descriptor,
     });
+  }
+
+  pub fn get_new_address(&self) -> Result<AddressInfo, Error> {
+    self.sync()?;
+    let address = self.wallet.get_address(AddressIndex::LastUnused)?;
+    Ok(address)
+  }
+
+  fn sync(&self) ->Result<(), Error> {
+    self.wallet.sync(self.blockchain.get_blockchain(), SyncOptions::default())?;
+    Ok(())
   }
 }
 
@@ -294,6 +330,32 @@ mod tests {
     let wallet = Wallet::from_multisig(blockchain, &multisig).unwrap();
     let descriptors = wallet.get_descriptors().unwrap();
     assert_eq!(descriptors.descriptor, "wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*))#8dwny30k"); 
-    assert_eq!(descriptors.change_descriptor, "wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*))#77ah2z6r"); 
+    assert_eq!(descriptors.change_descriptor, Some("wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*))#77ah2z6r".to_string())); 
+  }
+
+  #[test]
+  fn test_wallet_get_new_address() {
+    let cosigner1 = Cosigner{
+          xfp:Some("20F24288".to_string()),
+          derivation_path: Some("m/48'/0'/0'/2'".to_string()),
+          xpub: "Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi".to_string(),
+        };
+
+    let cosigner2 = Cosigner{
+          xfp:Some("E9A0CF4A".to_string()),
+          derivation_path: Some("m/48'/0'/0'/2'".to_string()),
+          xpub: "Zpub74kbYv5LXvBaJRcbSiihEEwuDiBSDztjtpSVmt6C6nB3ntbcEy4pLP3cJGVWsKbYKaAynfCwXnkuVncPGQ9Y4XwWJDWrDMUwTztdxBe7GcM".to_string(),
+        };
+    let mut multisig = Multisig::new(2);
+    multisig.add_cosigner(cosigner1);
+    multisig.add_cosigner(cosigner2);
+
+    let blockchain = Blockchain::new("ssl://electrum.blockstream.info:60002",bitcoin::Network::Bitcoin).unwrap();
+    let wallet = Wallet::from_multisig(blockchain, &multisig).unwrap();
+    let address = wallet.get_new_address().unwrap();
+    assert_eq!(address.to_string(), "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"); 
+    //Calling it again should return same address since it has not been used
+    let address = wallet.get_new_address().unwrap();
+    assert_eq!(address.to_string(), "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"); 
   }
 }
