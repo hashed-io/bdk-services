@@ -1,21 +1,21 @@
-pub mod util;
 pub mod errors;
+pub mod util;
 
 use bdk::blockchain::ElectrumBlockchain;
 use bdk::database::MemoryDatabase;
 use bdk::electrum_client::Client;
 use bdk::wallet::export::WalletExport;
-use bdk::wallet::{AddressInfo, AddressIndex};
-use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions};
-use bitcoin::consensus::{deserialize, serialize};
+use bdk::wallet::{AddressIndex, AddressInfo};
+use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
+use bitcoin::blockdata::script::Script;
+use bitcoin::consensus;
 use bitcoin::util::psbt::PartiallySignedTransaction;
 use bitcoin::Network;
-use std::error;
-use rocket::serde::{Deserialize, Serialize, json::Json};
+use core::str::FromStr;
 use errors::Error;
-
-
-type BoxResult<T> = Result<T,Box<dyn error::Error>>;
+use rocket::serde::{json::Json, Deserialize, Serialize};
+use std::clone::Clone;
+use std::error;
 
 #[derive(Deserialize, Serialize)]
 pub struct Cosigner {
@@ -25,7 +25,6 @@ pub struct Cosigner {
 }
 
 impl Cosigner {
-
   pub fn descriptor(&self, change: bool) -> Result<String, Error> {
     let mut s = String::new();
     let child = if change { "/1/*" } else { "/0/*" };
@@ -36,9 +35,16 @@ impl Cosigner {
       s = format!("[{}/{}]", xfp, path);
     }
     if !util::is_multisig_xpub(&self.xpub) {
-      return Err(bdk::Error::Generic(format!("xpub is not a multisig xpub. xpub:{}",self.xpub)).into())
+      return Err(
+        bdk::Error::Generic(format!("xpub is not a multisig xpub. xpub:{}", self.xpub)).into(),
+      );
     }
-    Ok(format!("{}{}{}", s, util::to_legacy_xpub(&self.xpub)? , child))
+    Ok(format!(
+      "{}{}{}",
+      s,
+      util::to_legacy_xpub(&self.xpub)?,
+      child
+    ))
   }
 }
 
@@ -49,27 +55,36 @@ pub struct Multisig {
 }
 
 impl Multisig {
-
-  pub fn new(threshold: u32) -> Self{
+  pub fn new(threshold: u32) -> Self {
     return Multisig {
       threshold,
-      cosigners: Vec::new()
-    }
+      cosigners: Vec::new(),
+    };
   }
 
-  pub fn add_cosigner(&mut self, cosigner: Cosigner){
+  pub fn add_cosigner(&mut self, cosigner: Cosigner) {
     self.cosigners.push(cosigner);
   }
 
   pub fn descriptor(&self, change: bool) -> Result<String, Error> {
     if self.threshold > self.cosigners.len() as u32 {
-      return Err(errors::Error::new(&format!("multisig threshold: {} is greater than the number of cosigners: {}", self.threshold, self.cosigners.len())).into())
+      return Err(
+        errors::Error::new(&format!(
+          "multisig threshold: {} is greater than the number of cosigners: {}",
+          self.threshold,
+          self.cosigners.len()
+        ))
+        .into(),
+      );
     }
     let mut descriptor = String::new();
     for cosigner in &self.cosigners {
-      descriptor = format!("{},{}", descriptor,cosigner.descriptor(change)?);
+      descriptor = format!("{},{}", descriptor, cosigner.descriptor(change)?);
     }
-    Ok(format!("wsh(sortedmulti({}{}))", self.threshold, descriptor))
+    Ok(format!(
+      "wsh(sortedmulti({}{}))",
+      self.threshold, descriptor
+    ))
   }
 }
 
@@ -83,7 +98,7 @@ impl Descriptors {
   pub fn new(descriptor: String, change_descriptor: String) -> Descriptors {
     Descriptors {
       descriptor,
-      change_descriptor: Some(change_descriptor)
+      change_descriptor: Some(change_descriptor),
     }
   }
 
@@ -93,6 +108,14 @@ impl Descriptors {
       change_descriptor: None,
     }
   }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Trx {
+  pub descriptors: Descriptors,
+  pub to_pub_key: String,
+  pub amount: u64,
+  pub fee_sat_per_vb: f32,
 }
 
 pub struct Blockchain {
@@ -114,31 +137,22 @@ impl Blockchain {
   }
 }
 
-pub struct Wallet {
-  blockchain: Blockchain,
+pub struct Wallet<'a> {
+  blockchain: &'a Blockchain,
   wallet: bdk::Wallet<MemoryDatabase>,
 }
 
-impl Wallet {
-
-  pub fn new(
-    url: &str,
-    network: Network,
-    descriptors: &Descriptors
-  ) -> Result<Self, Error> {
-    Self::from_descriptors(Blockchain::new(url, network)?, descriptors)
-  }
-
-  pub fn from_multisig(blockchain: Blockchain, multisig: &Multisig) -> Result<Self, Error> {
+impl<'a> Wallet<'a> {
+  pub fn from_multisig(blockchain: &'a Blockchain, multisig: &Multisig) -> Result<Self, Error> {
     Self::from_descriptors(
       blockchain,
-      &Descriptors::new(multisig.descriptor(false)?, multisig.descriptor(true)?)
+      &Descriptors::new(multisig.descriptor(false)?, multisig.descriptor(true)?),
     )
   }
 
   pub fn from_descriptors(
-    blockchain: Blockchain,
-    descriptors: &Descriptors
+    blockchain: &'a Blockchain,
+    descriptors: &Descriptors,
   ) -> Result<Self, Error> {
     let network = blockchain.network.clone();
     Ok(Wallet {
@@ -157,10 +171,8 @@ impl Wallet {
       .wallet
       .public_descriptor(KeychainKind::External)?
       .ok_or(bdk::Error::Generic("No descriptor for wallet".to_string()))?;
-    let change_descriptor = self
-      .wallet
-      .public_descriptor(KeychainKind::Internal)?;
-    let change_descriptor = change_descriptor.map(|desc|desc.to_string());
+    let change_descriptor = self.wallet.public_descriptor(KeychainKind::Internal)?;
+    let change_descriptor = change_descriptor.map(|desc| desc.to_string());
     return Ok(Descriptors {
       descriptor: descriptor.to_string(),
       change_descriptor,
@@ -173,8 +185,41 @@ impl Wallet {
     Ok(address)
   }
 
-  fn sync(&self) ->Result<(), Error> {
-    self.wallet.sync(self.blockchain.get_blockchain(), SyncOptions::default())?;
+  pub fn get_balance(&self) -> Result<u64, Error> {
+    self.sync()?;
+    let balance = self.wallet.get_balance()?;
+    Ok(balance)
+  }
+
+  pub fn build_tx(
+    &self,
+    trx: &Trx,
+  ) -> Result<(PartiallySignedTransaction, TransactionDetails), Error> {
+    self.sync()?;
+    let mut builder = self.wallet.build_tx();
+    // let to_wallet = Wallet::from_descriptors(self.blockchain, &Descriptors::from_descriptor(trx.to_pub_key.clone()))?;
+    // to_wallet.sync()?;
+    builder
+      // .add_recipient(to_wallet.get_new_address()?.script_pubkey(), trx.amount)
+      .add_recipient(
+        Script::from_str(&trx.to_pub_key)?,
+        trx.amount,
+      )
+      .enable_rbf()
+      .do_not_spend_change()
+      .fee_rate(FeeRate::from_sat_per_vb(trx.fee_sat_per_vb));
+    Ok(builder.finish()?)
+  }
+
+  pub fn build_tx_encoded(&self, trx: &Trx) -> Result<String, Error> {
+    let (psbt, _) = self.build_tx(trx)?;
+    Ok(base64::encode(consensus::serialize(&psbt)))
+  }
+
+  fn sync(&self) -> Result<(), Error> {
+    self
+      .wallet
+      .sync(self.blockchain.get_blockchain(), SyncOptions::default())?;
     Ok(())
   }
 }
@@ -252,7 +297,7 @@ mod tests {
 
     let result = cosigner.descriptor(false);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("xpub is not a multisig xpub. xpub:zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi"));  
+    assert!(result.unwrap_err().to_string().contains("xpub is not a multisig xpub. xpub:zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi"));
   }
 
   #[test]
@@ -278,14 +323,12 @@ mod tests {
     multisig.add_cosigner(cosigner1);
     multisig.add_cosigner(cosigner2);
 
-    assert_eq!(multisig.descriptor(false).unwrap(), "wsh(sortedmulti(2,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*))"); 
-    
+    assert_eq!(multisig.descriptor(false).unwrap(), "wsh(sortedmulti(2,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*))");
     multisig.add_cosigner(cosigner3);
 
-    assert_eq!(multisig.descriptor(false).unwrap(), "wsh(sortedmulti(2,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*,[232377FA/48'/0'/0'/2']xpub6Er7TKATMEfe6r7SXgStfAKA19Kht3XjFzaHvP9Rn6diH8aZwFTxHHtxqqa61h9vwSTW7VFEY6yd2UVpHA4xYKQzHTNXAPuGnNjsmQqLoQB/0/*))"); 
-    
+    assert_eq!(multisig.descriptor(false).unwrap(), "wsh(sortedmulti(2,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*,[232377FA/48'/0'/0'/2']xpub6Er7TKATMEfe6r7SXgStfAKA19Kht3XjFzaHvP9Rn6diH8aZwFTxHHtxqqa61h9vwSTW7VFEY6yd2UVpHA4xYKQzHTNXAPuGnNjsmQqLoQB/0/*))");
     multisig.threshold = 3;
-    assert_eq!(multisig.descriptor(true).unwrap(), "wsh(sortedmulti(3,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*,[232377FA/48'/0'/0'/2']xpub6Er7TKATMEfe6r7SXgStfAKA19Kht3XjFzaHvP9Rn6diH8aZwFTxHHtxqqa61h9vwSTW7VFEY6yd2UVpHA4xYKQzHTNXAPuGnNjsmQqLoQB/1/*))"); 
+    assert_eq!(multisig.descriptor(true).unwrap(), "wsh(sortedmulti(3,[20F24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[E9A0CF4A/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*,[232377FA/48'/0'/0'/2']xpub6Er7TKATMEfe6r7SXgStfAKA19Kht3XjFzaHvP9Rn6diH8aZwFTxHHtxqqa61h9vwSTW7VFEY6yd2UVpHA4xYKQzHTNXAPuGnNjsmQqLoQB/1/*))");
   }
 
   #[test]
@@ -306,7 +349,10 @@ mod tests {
     cosigners.add_cosigner(cosigner2);
     let result = cosigners.descriptor(false);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().to_string(), "multisig threshold: 3 is greater than the number of cosigners: 2");
+    assert_eq!(
+      result.unwrap_err().to_string(),
+      "multisig threshold: 3 is greater than the number of cosigners: 2"
+    );
   }
 
   #[test]
@@ -326,11 +372,15 @@ mod tests {
     multisig.add_cosigner(cosigner1);
     multisig.add_cosigner(cosigner2);
 
-    let blockchain = Blockchain::new("ssl://electrum.blockstream.info:60002",bitcoin::Network::Bitcoin).unwrap();
-    let wallet = Wallet::from_multisig(blockchain, &multisig).unwrap();
+    let blockchain = Blockchain::new(
+      "ssl://electrum.blockstream.info:60002",
+      bitcoin::Network::Bitcoin,
+    )
+    .unwrap();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
     let descriptors = wallet.get_descriptors().unwrap();
-    assert_eq!(descriptors.descriptor, "wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*))#8dwny30k"); 
-    assert_eq!(descriptors.change_descriptor, Some("wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*))#77ah2z6r".to_string())); 
+    assert_eq!(descriptors.descriptor, "wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/0/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/0/*))#8dwny30k");
+    assert_eq!(descriptors.change_descriptor, Some("wsh(sortedmulti(2,[20f24288/48'/0'/0'/2']xpub6F2hcB5PLR3L7BSjEeVCqCho8oC7m23U5jF48mkwEPdn5zmhmayu6tSPacmGUuG4LU1rJT7sRr6QJz8mrVkTCadMCaQHisQFQrP4y1uRvYH/1/*,[e9a0cf4a/48'/0'/0'/2']xpub6EBypM14fbYFBG4yqLgTyzR69yrH8QE9kKkPHq2sxzat4WQEyFMR18sQT9csK54oGpsPR81hjFfJc3mVXnAZKaTdj51be8Ny2pVUb3jv6MC/1/*))#77ah2z6r".to_string()));
   }
 
   #[test]
@@ -350,12 +400,57 @@ mod tests {
     multisig.add_cosigner(cosigner1);
     multisig.add_cosigner(cosigner2);
 
-    let blockchain = Blockchain::new("ssl://electrum.blockstream.info:60002",bitcoin::Network::Bitcoin).unwrap();
-    let wallet = Wallet::from_multisig(blockchain, &multisig).unwrap();
+    let blockchain = Blockchain::new(
+      "ssl://electrum.blockstream.info:60002",
+      bitcoin::Network::Bitcoin,
+    )
+    .unwrap();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
     let address = wallet.get_new_address().unwrap();
-    assert_eq!(address.to_string(), "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"); 
+    assert_eq!(
+      address.to_string(),
+      "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"
+    );
     //Calling it again should return same address since it has not been used
     let address = wallet.get_new_address().unwrap();
-    assert_eq!(address.to_string(), "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"); 
+    assert_eq!(
+      address.to_string(),
+      "bc1q0gepljl6qsn9cn5d3z3jdvsrvrj4xr0j36g8tdhkkqdsw5jmxz2qdfkns2"
+    );
+  }
+
+  #[test]
+  fn test_wallet_build_tx_encoded() {
+    let cosigner1 = Cosigner{
+      xfp:None,
+      derivation_path: None,
+      xpub: "Vpub5fCyVFyiBup7VKTCTX1vrMP4h2rjz8mxkmwzS8PZ1hZVf3U1AhKU49AYkom3KXDS4jLNyvnvobWkpkESVT3n8RkpwKWCBcUiV3y7wFFRktE".to_string(),
+    };
+
+    let cosigner2 = Cosigner{
+      xfp:None,
+      derivation_path: None,
+      xpub: "Vpub5fL9LPRhSA6g5b56Dbgo6ruJ1DASCWE12jwiViwygh6NL3ALDoXVQpsiRApMSjvfotEKpSW9J2RgXoJLvDni2mT9mYicKrisXzQaMGBJfYv".to_string(),
+    };
+    let mut multisig = Multisig::new(2);
+    multisig.add_cosigner(cosigner1);
+    multisig.add_cosigner(cosigner2);
+
+    let blockchain = Blockchain::new(
+      "ssl://electrum.blockstream.info:60002",
+      bitcoin::Network::Testnet,
+    )
+    .unwrap();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
+    let trx = Trx {
+      descriptors: wallet.get_descriptors().unwrap(),
+      to_pub_key:"5221025cc1ab1aef6d21a44e2a7df8623df7249836863f01d46915c72352cef80226d521032a23b1b6bc15d997926aa4461e57345cdfc5bbdad2e2ba6b3e2e8ef07198b80652ae".to_string(),
+      amount: 10_000,
+      fee_sat_per_vb: 5.0,
+    };
+    println!("Trx: {:#?}", trx);
+    println!("Address: {:#?}", wallet.get_new_address().unwrap());
+    println!("Balance: {:#?}", wallet.get_balance().unwrap());
+    wallet.build_tx_encoded(&trx).unwrap();
   }
 }

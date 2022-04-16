@@ -1,4 +1,4 @@
-use bdk;
+use bitcoin;
 use rocket::http::{ContentType, Status};
 use rocket::request::Request;
 use rocket::response;
@@ -47,6 +47,12 @@ impl From<bdk::Error> for Error {
 
 impl From<bdk::electrum_client::Error> for Error {
     fn from(err: bdk::electrum_client::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<bitcoin_hashes::hex::Error> for Error {
+    fn from(err: bitcoin_hashes::hex::Error) -> Self {
         Error::new(&err.to_string())
     }
 }

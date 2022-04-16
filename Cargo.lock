@@ -137,6 +137,7 @@ dependencies = [
  "base64 0.13.0",
  "bdk",
  "bitcoin",
+ "bitcoin_hashes",
  "rocket",
  "serde",
  "xyzpub",

@@ -7,7 +7,7 @@ use bdk::bitcoin;
 use bdk::database::MemoryDatabase;
 use bdk::wallet::AddressIndex::New;
 use bitcoin::Network;
-use bdk_services::hbdk::{Multisig, Descriptors, Wallet, Blockchain, errors::Error};
+use bdk_services::hbdk::{Multisig, Descriptors, Wallet, Blockchain, Trx, errors::Error};
 use rocket::serde::{Deserialize, json::Json};
 use rocket::State;
 use rocket::fairing::AdHoc;
@@ -23,7 +23,8 @@ fn gen_new_address(config: &State<Config>, descriptors: Json<Descriptors>) -> Re
 
     // input is a list of xpubs and the multisig threshold
     // output is the properly formatted output descriptor
-    let wallet = Wallet::new(&config.network_url, config.network, &descriptors)?;
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     let address = wallet.get_new_address()?;
     Ok(address.to_string())
 
@@ -35,9 +36,20 @@ fn gen_output_descriptor(config: &State<Config>, multisig: Json<Multisig>) -> Re
     // input is a list of xpubs and the multisig threshold
     // output is the properly formatted output descriptor
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
-    let wallet = Wallet::from_multisig(blockchain, &multisig)?;
+    let wallet = Wallet::from_multisig(&blockchain, &multisig)?;
     let descriptors = wallet.get_descriptors()?;
     Ok(Json(descriptors))
+
+}
+
+#[post("/gen_psbt", data = "<trx>")]
+fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
+
+    // input is a list of xpubs and the multisig threshold
+    // output is the properly formatted output descriptor
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &trx.descriptors)?;
+    Ok(wallet.build_tx_encoded(&trx)?)
 
 }
 
@@ -58,6 +70,6 @@ fn index() -> &'static str {
 #[launch]
 fn rocket() -> _ {
     rocket::build()
-    .mount("/", routes![index, gen_output_descriptor, gen_new_address])
+    .mount("/", routes![index, gen_output_descriptor, gen_new_address, gen_psbt])
     .attach(AdHoc::config::<Config>())
 }
