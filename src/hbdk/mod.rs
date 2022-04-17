@@ -1,7 +1,7 @@
 pub mod errors;
 pub mod util;
 
-use bdk::blockchain::ElectrumBlockchain;
+use bdk::blockchain::{Blockchain as BlockchainTrait, ElectrumBlockchain};
 use bdk::database::MemoryDatabase;
 use bdk::electrum_client::Client;
 use bdk::wallet::export::WalletExport;
@@ -10,7 +10,8 @@ use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
 use bitcoin::blockdata::script::Script;
 use bitcoin::consensus;
 use bitcoin::util::psbt::PartiallySignedTransaction;
-use bitcoin::Network;
+use bitcoin::util::address::{Address, AddressType};
+use bitcoin::{Network, Transaction};
 use core::str::FromStr;
 use errors::Error;
 use rocket::serde::{json::Json, Deserialize, Serialize};
@@ -113,10 +114,17 @@ impl Descriptors {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Trx {
   pub descriptors: Descriptors,
-  pub to_pub_key: String,
+  pub to_address: String,
   pub amount: u64,
   pub fee_sat_per_vb: f32,
 }
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SignedTrx {
+  pub descriptors: Descriptors,
+  pub psbts: Vec<String>,
+}
+
 
 pub struct Blockchain {
   blockchain: ElectrumBlockchain,
@@ -134,6 +142,11 @@ impl Blockchain {
 
   pub fn get_blockchain(&self) -> &ElectrumBlockchain {
     &self.blockchain
+  }
+
+  pub fn broadcast(&self, tx: &Transaction)-> Result<(), Error> {
+    self.blockchain.broadcast(tx)?;
+    Ok(())
   }
 }
 
@@ -202,7 +215,7 @@ impl<'a> Wallet<'a> {
     builder
       // .add_recipient(to_wallet.get_new_address()?.script_pubkey(), trx.amount)
       .add_recipient(
-        Script::from_str(&trx.to_pub_key)?,
+        Address::from_str(&trx.to_address)?.script_pubkey(),
         trx.amount,
       )
       .enable_rbf()
@@ -214,6 +227,30 @@ impl<'a> Wallet<'a> {
   pub fn build_tx_encoded(&self, trx: &Trx) -> Result<String, Error> {
     let (psbt, _) = self.build_tx(trx)?;
     Ok(base64::encode(consensus::serialize(&psbt)))
+  }
+
+  pub fn finalize_trx(&self, psbts: &[String])-> Result<String, Error> {
+    if psbts.len() < 2 {
+      return Err(Error::new(&format!("failed to finalized tx, there are less than required psbts, found: {}", psbts.len())));
+    }
+    let mut combined = self.deserialize_psbt(&psbts[0])?;
+    for psbt in &psbts[1..] {
+      combined.merge(self.deserialize_psbt(psbt)?)?;
+    }
+    self.sync()?;
+    let finalized = self.wallet.finalize_psbt(&mut combined, SignOptions::default())?;
+    if !finalized {
+      return Err(Error::new("provided psbts do not finalize tx"));
+    }
+    let tx = combined.extract_tx();
+    self.blockchain.broadcast(&tx)?;
+    Ok(tx.txid().to_string())
+  }
+
+  fn deserialize_psbt(&self, psbt: &str)-> Result<PartiallySignedTransaction, Error> {
+    let decoded = base64::decode(psbt).unwrap_or(psbt.as_bytes().to_vec());
+    let deserialized = consensus::deserialize(&decoded)?;
+    Ok(deserialized)
   }
 
   fn sync(&self) -> Result<(), Error> {
@@ -444,7 +481,7 @@ mod tests {
     let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
     let trx = Trx {
       descriptors: wallet.get_descriptors().unwrap(),
-      to_pub_key:"5221025cc1ab1aef6d21a44e2a7df8623df7249836863f01d46915c72352cef80226d521032a23b1b6bc15d997926aa4461e57345cdfc5bbdad2e2ba6b3e2e8ef07198b80652ae".to_string(),
+      to_address:"tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30".to_string(),
       amount: 10_000,
       fee_sat_per_vb: 5.0,
     };
@@ -452,5 +489,16 @@ mod tests {
     println!("Address: {:#?}", wallet.get_new_address().unwrap());
     println!("Balance: {:#?}", wallet.get_balance().unwrap());
     wallet.build_tx_encoded(&trx).unwrap();
+  }
+
+  #[test]
+  fn test_address() {
+    let address = Address::from_str("tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30").unwrap();
+    assert_eq!(address.to_string(), "tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30");
+    assert_eq!(address.address_type().unwrap(), AddressType::P2wsh);
+
+    let address = Address::from_str("tb1q0tuqrsd5tqqa9l3juwn9un7lgax7u3mg6uzglf").unwrap();
+    assert_eq!(address.to_string(), "tb1q0tuqrsd5tqqa9l3juwn9un7lgax7u3mg6uzglf");
+    assert_eq!(address.address_type().unwrap(), AddressType::P2wpkh);
   }
 }

@@ -1,4 +1,7 @@
-use bitcoin;
+use bitcoin::consensus::encode;
+use bitcoin::util;
+use bitcoin::util::address;
+use bitcoin::util::psbt;
 use rocket::http::{ContentType, Status};
 use rocket::request::Request;
 use rocket::response;
@@ -7,6 +10,7 @@ use rocket::serde::{json::Json, Deserialize, Serialize};
 use std::error;
 use std::fmt;
 use xyzpub;
+
 
 #[derive(Debug, Serialize)]
 pub struct Error {
@@ -53,6 +57,23 @@ impl From<bdk::electrum_client::Error> for Error {
 
 impl From<bitcoin_hashes::hex::Error> for Error {
     fn from(err: bitcoin_hashes::hex::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<encode::Error> for Error {
+    fn from(err: encode::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<psbt::Error> for Error {
+    fn from(err: psbt::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+impl From<address::Error> for Error {
+    fn from(err: address::Error) -> Self {
         Error::new(&err.to_string())
     }
 }

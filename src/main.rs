@@ -7,7 +7,7 @@ use bdk::bitcoin;
 use bdk::database::MemoryDatabase;
 use bdk::wallet::AddressIndex::New;
 use bitcoin::Network;
-use bdk_services::hbdk::{Multisig, Descriptors, Wallet, Blockchain, Trx, errors::Error};
+use bdk_services::hbdk::{Multisig, Descriptors, Wallet, Blockchain, Trx, SignedTrx, errors::Error};
 use rocket::serde::{Deserialize, json::Json};
 use rocket::State;
 use rocket::fairing::AdHoc;
@@ -45,12 +45,18 @@ fn gen_output_descriptor(config: &State<Config>, multisig: Json<Multisig>) -> Re
 #[post("/gen_psbt", data = "<trx>")]
 fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
 
-    // input is a list of xpubs and the multisig threshold
-    // output is the properly formatted output descriptor
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &trx.descriptors)?;
     Ok(wallet.build_tx_encoded(&trx)?)
 
+}
+
+#[post("/finalize_trx", data = "<signed_trx>")]
+fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<String, Error> {
+
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &signed_trx.descriptors)?;
+    Ok(wallet.finalize_trx(signed_trx.psbts.as_slice())?)
 }
 
 // #[get("/get_balance")]
@@ -70,6 +76,6 @@ fn index() -> &'static str {
 #[launch]
 fn rocket() -> _ {
     rocket::build()
-    .mount("/", routes![index, gen_output_descriptor, gen_new_address, gen_psbt])
+    .mount("/", routes![index, gen_output_descriptor, gen_new_address, gen_psbt, finalize_trx])
     .attach(AdHoc::config::<Config>())
 }
