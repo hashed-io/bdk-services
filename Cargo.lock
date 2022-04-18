@@ -138,6 +138,7 @@ dependencies = [
  "bdk",
  "bitcoin",
  "bitcoin_hashes",
+ "miniscript",
  "rocket",
  "serde",
  "xyzpub",

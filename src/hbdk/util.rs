@@ -10,6 +10,20 @@ pub fn to_legacy_xpub(xpub: &str)-> Result<String, Error>{
   Ok(xyzpub::convert_version(xpub, &get_legacy_version(xpub)?)?)
 }
 
+pub fn to_segwit_native_multisig_xpub(xpub: &str)-> Result<String, Error>{
+  Ok(xyzpub::convert_version(xpub, &get_segwit_native_multisig_version(xpub)?)?)
+}
+
+pub fn get_segwit_native_multisig_version(xpub: &str) -> Result<xyzpub::Version, Error> {
+  if is_testnet_xpub(xpub) {
+    Ok(xyzpub::Version::VpubMultisig)
+  } else if is_mainnet_xpub(xpub) {
+    Ok(xyzpub::Version::ZpubMultisig)
+  } else {
+    Err(Error::new("Unknown xpub version"))
+  }
+}
+
 pub fn get_legacy_version(xpub: &str) -> Result<xyzpub::Version, Error> {
   if is_testnet_xpub(xpub) {
     Ok(xyzpub::Version::Tpub)
@@ -81,7 +95,7 @@ mod tests {
   }
 
   #[test]
-  fn test_is__multisig_xpub() {
+  fn test_is_multisig_xpub() {
     assert_eq!(is_multisig_xpub("Vpub5fCyVFyiBup7VKTCTX1vrMP4h2rjz8mxkmwzS8PZ1hZVf3U1AhKU49AYkom3KXDS4jLNyvnvobWkpkESVT3n8RkpwKWCBcUiV3y7wFFRktE"), true);
     assert_eq!(is_multisig_xpub("zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi"), false);
     assert_eq!(is_multisig_xpub("Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi"), true);

@@ -3,22 +3,21 @@ pub mod util;
 
 use bdk::blockchain::{Blockchain as BlockchainTrait, ElectrumBlockchain};
 use bdk::database::MemoryDatabase;
+use bdk::descriptor::{Descriptor};
 use bdk::electrum_client::Client;
-use bdk::wallet::export::WalletExport;
 use bdk::wallet::{AddressIndex, AddressInfo};
 use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
-use bitcoin::blockdata::script::Script;
 use bitcoin::consensus;
+use bitcoin::util::address::{Address};
 use bitcoin::util::psbt::PartiallySignedTransaction;
-use bitcoin::util::address::{Address, AddressType};
 use bitcoin::{Network, Transaction};
 use core::str::FromStr;
 use errors::Error;
-use rocket::serde::{json::Json, Deserialize, Serialize};
+use miniscript::descriptor::{DescriptorPublicKey, WshInner};
+use rocket::serde::{Deserialize, Serialize};
 use std::clone::Clone;
-use std::error;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Hash)]
 pub struct Cosigner {
   pub xfp: Option<String>,
   pub xpub: String,
@@ -26,6 +25,13 @@ pub struct Cosigner {
 }
 
 impl Cosigner {
+  pub fn new(xpub: String) -> Self {
+    Cosigner {
+      xpub,
+      xfp: None,
+      derivation_path: None,
+    }
+  }
   pub fn descriptor(&self, change: bool) -> Result<String, Error> {
     let mut s = String::new();
     let child = if change { "/1/*" } else { "/0/*" };
@@ -48,6 +54,26 @@ impl Cosigner {
     ))
   }
 }
+
+impl PartialEq for Cosigner {
+  fn eq(&self, other: &Self) -> bool {
+    if let Some(xfp) = &self.xfp {
+      if other.xfp.is_none() {
+        return false;
+      }
+      if xfp.to_lowercase() != other.xfp.as_ref().unwrap().to_lowercase() {
+        return false;
+      }
+    } else {
+      if other.xfp.is_some() {
+        return false;
+      }
+    }
+    self.derivation_path == other.derivation_path && self.xpub == other.xpub
+  }
+}
+
+impl Eq for Cosigner {}
 
 #[derive(Deserialize, Serialize)]
 pub struct Multisig {
@@ -125,7 +151,6 @@ pub struct SignedTrx {
   pub psbts: Vec<String>,
 }
 
-
 pub struct Blockchain {
   blockchain: ElectrumBlockchain,
   network: Network,
@@ -144,7 +169,7 @@ impl Blockchain {
     &self.blockchain
   }
 
-  pub fn broadcast(&self, tx: &Transaction)-> Result<(), Error> {
+  pub fn broadcast(&self, tx: &Transaction) -> Result<(), Error> {
     self.blockchain.broadcast(tx)?;
     Ok(())
   }
@@ -180,16 +205,50 @@ impl<'a> Wallet<'a> {
   }
 
   pub fn get_descriptors(&self) -> Result<Descriptors, Error> {
-    let descriptor = self
-      .wallet
-      .public_descriptor(KeychainKind::External)?
-      .ok_or(bdk::Error::Generic("No descriptor for wallet".to_string()))?;
+    let descriptor = self.get_external_descriptor()?;
     let change_descriptor = self.wallet.public_descriptor(KeychainKind::Internal)?;
     let change_descriptor = change_descriptor.map(|desc| desc.to_string());
-    return Ok(Descriptors {
+    Ok(Descriptors {
       descriptor: descriptor.to_string(),
       change_descriptor,
-    });
+    })
+  }
+
+  pub fn get_multisig(&self) -> Result<Multisig, Error> {
+    let mut multisig;
+    let descriptor = self.get_external_descriptor()?;
+    if let Descriptor::Wsh(wsh) = descriptor {
+      if let WshInner::SortedMulti(sm) = wsh.as_inner() {
+        multisig = Multisig::new(sm.k as u32);
+        for pk in &sm.pks {
+          if let DescriptorPublicKey::XPub(xpub) = pk {
+            let mut cosigner = Cosigner::new(util::to_segwit_native_multisig_xpub(
+              &xpub.xkey.to_string(),
+            )?);
+            if let Some((xfp, derivation_path)) = &xpub.origin {
+              cosigner.xfp = Some(xfp.to_string());
+              cosigner.derivation_path = Some(derivation_path.to_string());
+            }
+            multisig.add_cosigner(cosigner);
+          } else {
+            return Err(Error::new(&format!(
+              "Wallet does not only contain xpubs, found:{}",
+              pk
+            )));
+          }
+        }
+      } else {
+        return Err(Error::new(
+          "Wallet is not of type sorted multisig, found miniscript",
+        ));
+      }
+    } else {
+      return Err(Error::new(&format!(
+        "Wallet is not of type Pay-to-Witness-Script-Hash, found: {}",
+        descriptor
+      )));
+    }
+    Ok(multisig)
   }
 
   pub fn get_new_address(&self) -> Result<AddressInfo, Error> {
@@ -229,16 +288,21 @@ impl<'a> Wallet<'a> {
     Ok(base64::encode(consensus::serialize(&psbt)))
   }
 
-  pub fn finalize_trx(&self, psbts: &[String])-> Result<String, Error> {
+  pub fn finalize_trx(&self, psbts: &[String]) -> Result<String, Error> {
     if psbts.len() < 2 {
-      return Err(Error::new(&format!("failed to finalized tx, there are less than required psbts, found: {}", psbts.len())));
+      return Err(Error::new(&format!(
+        "failed to finalized tx, there are less than required psbts, found: {}",
+        psbts.len()
+      )));
     }
     let mut combined = self.deserialize_psbt(&psbts[0])?;
     for psbt in &psbts[1..] {
       combined.merge(self.deserialize_psbt(psbt)?)?;
     }
     self.sync()?;
-    let finalized = self.wallet.finalize_psbt(&mut combined, SignOptions::default())?;
+    let finalized = self
+      .wallet
+      .finalize_psbt(&mut combined, SignOptions::default())?;
     if !finalized {
       return Err(Error::new("provided psbts do not finalize tx"));
     }
@@ -247,7 +311,17 @@ impl<'a> Wallet<'a> {
     Ok(tx.txid().to_string())
   }
 
-  fn deserialize_psbt(&self, psbt: &str)-> Result<PartiallySignedTransaction, Error> {
+  fn get_external_descriptor(
+    &self,
+  ) -> Result<miniscript::Descriptor<miniscript::DescriptorPublicKey>, Error> {
+    let descriptor = self
+      .wallet
+      .public_descriptor(KeychainKind::External)?
+      .ok_or(bdk::Error::Generic("No descriptor for wallet".to_string()))?;
+    Ok(descriptor)
+  }
+
+  fn deserialize_psbt(&self, psbt: &str) -> Result<PartiallySignedTransaction, Error> {
     let decoded = base64::decode(psbt).unwrap_or(psbt.as_bytes().to_vec());
     let deserialized = consensus::deserialize(&decoded)?;
     Ok(deserialized)
@@ -265,6 +339,8 @@ impl<'a> Wallet<'a> {
 mod tests {
 
   use crate::hbdk::*;
+  use bitcoin::util::address::AddressType;
+
   #[test]
   fn test_cosigner_descriptor() {
     let cosigner = Cosigner{
@@ -421,6 +497,42 @@ mod tests {
   }
 
   #[test]
+  fn test_wallet_get_multisig() {
+    let cosigner1 = Cosigner{
+          xfp:Some("20F24288".to_string()),
+          derivation_path: Some("m/48'/0'/0'/2'".to_string()),
+          xpub: "Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi".to_string(),
+        };
+
+    let cosigner2 = Cosigner{
+          xfp:Some("E9A0CF4A".to_string()),
+          derivation_path: Some("m/48'/0'/0'/2'".to_string()),
+          xpub: "Zpub74kbYv5LXvBaJRcbSiihEEwuDiBSDztjtpSVmt6C6nB3ntbcEy4pLP3cJGVWsKbYKaAynfCwXnkuVncPGQ9Y4XwWJDWrDMUwTztdxBe7GcM".to_string(),
+        };
+    let mut original_multisig = Multisig::new(2);
+    original_multisig.add_cosigner(cosigner1);
+    original_multisig.add_cosigner(cosigner2);
+
+    let blockchain = Blockchain::new(
+      "ssl://electrum.blockstream.info:60002",
+      bitcoin::Network::Bitcoin,
+    )
+    .unwrap();
+    let wallet = Wallet::from_multisig(&blockchain, &original_multisig).unwrap();
+    assert_multisig(&mut original_multisig, &mut wallet.get_multisig().unwrap());
+
+    let cosigner1 = Cosigner:: new("Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi".to_string());
+    let cosigner2 = Cosigner:: new("Zpub74kbYv5LXvBaJRcbSiihEEwuDiBSDztjtpSVmt6C6nB3ntbcEy4pLP3cJGVWsKbYKaAynfCwXnkuVncPGQ9Y4XwWJDWrDMUwTztdxBe7GcM".to_string());
+
+    let mut original_multisig = Multisig::new(2);
+    original_multisig.add_cosigner(cosigner1);
+    original_multisig.add_cosigner(cosigner2);
+
+    let wallet = Wallet::from_multisig(&blockchain, &original_multisig).unwrap();
+    assert_multisig(&mut original_multisig, &mut wallet.get_multisig().unwrap());
+  }
+
+  #[test]
   fn test_wallet_get_new_address() {
     let cosigner1 = Cosigner{
           xfp:Some("20F24288".to_string()),
@@ -481,7 +593,7 @@ mod tests {
     let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
     let trx = Trx {
       descriptors: wallet.get_descriptors().unwrap(),
-      to_address:"tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30".to_string(),
+      to_address: "tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30".to_string(),
       amount: 10_000,
       fee_sat_per_vb: 5.0,
     };
@@ -493,12 +605,42 @@ mod tests {
 
   #[test]
   fn test_address() {
-    let address = Address::from_str("tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30").unwrap();
-    assert_eq!(address.to_string(), "tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30");
+    let address =
+      Address::from_str("tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30").unwrap();
+    assert_eq!(
+      address.to_string(),
+      "tb1qhfku74zsrhvre7053xqsnh36gsey3ur7slwwnfn04g5506rmdchqrf7w30"
+    );
     assert_eq!(address.address_type().unwrap(), AddressType::P2wsh);
 
     let address = Address::from_str("tb1q0tuqrsd5tqqa9l3juwn9un7lgax7u3mg6uzglf").unwrap();
-    assert_eq!(address.to_string(), "tb1q0tuqrsd5tqqa9l3juwn9un7lgax7u3mg6uzglf");
+    assert_eq!(
+      address.to_string(),
+      "tb1q0tuqrsd5tqqa9l3juwn9un7lgax7u3mg6uzglf"
+    );
     assert_eq!(address.address_type().unwrap(), AddressType::P2wpkh);
+  }
+
+  fn assert_multisig(ms1: &mut Multisig, ms2: &mut Multisig) {
+    assert_eq!(ms1.threshold, ms2.threshold);
+    assert_cosigners(&mut ms1.cosigners, &mut ms2.cosigners);
+  }
+
+  fn assert_cosigners(css1: &mut Vec<Cosigner>, css2: &mut Vec<Cosigner>) {
+    assert_eq!(
+      css1.len(),
+      css2.len(),
+      "Different number of cosigners, cs1: {}, cs2: {}",
+      css1.len(),
+      css2.len()
+    );
+    let mut iter1 = css1.iter_mut();
+    for cs1 in css2 {
+      let rcs2 = iter1.find(|cs2| {
+        return cs1.xpub == cs2.xpub;
+      });
+      assert!(rcs2.is_some(), "Cosigner not found: {:?}", cs1);
+      assert_eq!(cs1, rcs2.unwrap());
+    }
   }
 }

@@ -1,12 +1,10 @@
 use bitcoin::consensus::encode;
-use bitcoin::util;
 use bitcoin::util::address;
 use bitcoin::util::psbt;
-use rocket::http::{ContentType, Status};
 use rocket::request::Request;
 use rocket::response;
-use rocket::response::{status, Responder, Response};
-use rocket::serde::{json::Json, Deserialize, Serialize};
+use rocket::response::{status, Responder};
+use rocket::serde::{json::Json, Serialize};
 use std::error;
 use std::fmt;
 use xyzpub;
