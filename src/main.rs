@@ -21,8 +21,6 @@ fn gen_new_address(
     config: &State<Config>,
     descriptors: Json<Descriptors>,
 ) -> Result<String, Error> {
-    // input is a list of xpubs and the multisig threshold
-    // output is the properly formatted output descriptor
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     let address = wallet.get_new_address()?;
@@ -34,8 +32,6 @@ fn gen_multisig(
     config: &State<Config>,
     descriptors: Json<Descriptors>,
 ) -> Result<Json<Multisig>, Error> {
-    // input is a list of xpubs and the multisig threshold
-    // output is the properly formatted output descriptor
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     Ok(Json(wallet.get_multisig()?))
@@ -46,8 +42,6 @@ fn gen_output_descriptor(
     config: &State<Config>,
     multisig: Json<Multisig>,
 ) -> Result<Json<Descriptors>, Error> {
-    // input is a list of xpubs and the multisig threshold
-    // output is the properly formatted output descriptor
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_multisig(&blockchain, &multisig)?;
     let descriptors = wallet.get_descriptors()?;
@@ -68,14 +62,16 @@ fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<S
     Ok(wallet.finalize_trx(signed_trx.psbts.as_slice())?)
 }
 
-// #[get("/get_balance")]
-// fn get_balance(descriptor: &str) -> u32 {
-
-//     // get balance by querying the bitcoin node
-//     // return balance in sats
-
-//     return 0
-// }
+#[post("/get_balance", data = "<descriptors>")]
+fn get_balance(
+    config: &State<Config>,
+    descriptors: Json<Descriptors>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
+    let balance = wallet.get_balance()?;
+    Ok(balance.to_string())
+}
 
 #[get("/")]
 fn index() -> &'static str {
@@ -94,6 +90,7 @@ fn rocket() -> _ {
                 gen_psbt,
                 finalize_trx,
                 gen_multisig,
+                get_balance
             ],
         )
         .attach(AdHoc::config::<Config>())
