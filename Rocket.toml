@@ -1,3 +1,7 @@
 [default]
 network_url = "ssl://electrum.blockstream.info:60002"
 network = "testnet"
+
+[release]
+network_url = "ssl://electrum.blockstream.info:50002"
+network = "bitcoin"
