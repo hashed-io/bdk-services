@@ -16,22 +16,26 @@ use errors::Error;
 use miniscript::descriptor::{DescriptorPublicKey, WshInner};
 use rocket::serde::{Deserialize, Serialize};
 use std::clone::Clone;
+use std::convert::TryFrom;
+use lazy_static::lazy_static;
+use regex::Regex;
 
 #[derive(Debug, Deserialize, Serialize, Hash)]
+#[serde(try_from = "CosignerShadow")]
 pub struct Cosigner {
   pub xfp: Option<String>,
   pub xpub: String,
   pub derivation_path: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct CosignerShadow {
+  pub xfp: Option<String>,
+  pub xpub: String,
+  pub derivation_path: Option<String>,
+}
+
 impl Cosigner {
-  pub fn new(xpub: String) -> Self {
-    Cosigner {
-      xpub,
-      xfp: None,
-      derivation_path: None,
-    }
-  }
   pub fn descriptor(&self, change: bool) -> Result<String, Error> {
     let mut s = String::new();
     let child = if change { "/1/*" } else { "/0/*" };
@@ -43,7 +47,7 @@ impl Cosigner {
     }
     if !util::is_multisig_xpub(&self.xpub) {
       return Err(
-        bdk::Error::Generic(format!("xpub is not a multisig xpub. xpub:{}", self.xpub)).into(),
+        Error::new(&format!("xpub is not a multisig xpub. xpub:{}", self.xpub)),
       );
     }
     Ok(format!(
@@ -52,6 +56,50 @@ impl Cosigner {
       util::to_legacy_xpub(&self.xpub)?,
       child
     ))
+  }
+}
+
+impl TryFrom<CosignerShadow> for Cosigner {
+  type Error = Error;
+  
+  fn try_from(shadow: CosignerShadow) -> Result<Self, Self::Error>{
+    let mut cosigner = Cosigner::from_str(&shadow.xpub)?;
+    if cosigner.xfp.is_none() {
+      cosigner.xfp = shadow.xfp.map(|s| s.to_lowercase());
+      cosigner.derivation_path = shadow.derivation_path;
+    }
+    Ok(cosigner)
+  }
+}
+
+impl FromStr for Cosigner{
+  type Err = Error;
+  
+  fn from_str(s : &str) -> Result<Self, Error> {
+    lazy_static! {
+      static ref XPUB_RE: Regex = Regex::new(r"^[a-zA-Z\d]{111,112}$").unwrap();
+      static ref FULL_XPUB_RE: Regex = Regex::new(r"^\[(?P<xfp>[a-zA-Z\d]{8})(?P<dp>(?:/\d*')+)\](?P<xpub>[a-zA-Z\d]{111,112})(?:/[\d\*]+)*$").unwrap();
+    }
+    if FULL_XPUB_RE.is_match(s) {
+      let captures = FULL_XPUB_RE.captures(s).unwrap();
+      return Ok(
+        Cosigner {
+        xfp: Some(String::from(captures.name("xfp").unwrap().as_str().to_lowercase())),
+        xpub: String::from(captures.name("xpub").unwrap().as_str()),
+        derivation_path: Some(format!("m{}",captures.name("dp").unwrap().as_str()))
+        }
+    );
+      
+    } else if XPUB_RE.is_match(s) {
+      return Ok(
+        Cosigner {
+        xfp: None,
+        xpub: String::from(s),
+        derivation_path: None
+        }
+      );
+    }
+    Err(Error::new(&format!("invalid xpub format, xpub:{}", s)))
   }
 }
 
@@ -222,9 +270,9 @@ impl<'a> Wallet<'a> {
         multisig = Multisig::new(sm.k as u32);
         for pk in &sm.pks {
           if let DescriptorPublicKey::XPub(xpub) = pk {
-            let mut cosigner = Cosigner::new(util::to_segwit_native_multisig_xpub(
+            let mut cosigner = Cosigner::from_str(&util::to_segwit_native_multisig_xpub(
               &xpub.xkey.to_string(),
-            )?);
+            )?)?;
             if let Some((xfp, derivation_path)) = &xpub.origin {
               cosigner.xfp = Some(xfp.to_string());
               cosigner.derivation_path = Some(derivation_path.to_string());
@@ -521,8 +569,8 @@ mod tests {
     let wallet = Wallet::from_multisig(&blockchain, &original_multisig).unwrap();
     assert_multisig(&mut original_multisig, &mut wallet.get_multisig().unwrap());
 
-    let cosigner1 = Cosigner:: new("Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi".to_string());
-    let cosigner2 = Cosigner:: new("Zpub74kbYv5LXvBaJRcbSiihEEwuDiBSDztjtpSVmt6C6nB3ntbcEy4pLP3cJGVWsKbYKaAynfCwXnkuVncPGQ9Y4XwWJDWrDMUwTztdxBe7GcM".to_string());
+    let cosigner1 = Cosigner:: from_str("Zpub75bKLk9fCjgfELzLr2XS5TEcCXXGrci4EDwAcppFNBDwpNy53JhJS8cbRjdv39noPDKSfzK7EPC1Ciyfb7jRwY7DmiuYJ6WDr2nEL6yTkHi").unwrap();
+    let cosigner2 = Cosigner:: from_str("Zpub74kbYv5LXvBaJRcbSiihEEwuDiBSDztjtpSVmt6C6nB3ntbcEy4pLP3cJGVWsKbYKaAynfCwXnkuVncPGQ9Y4XwWJDWrDMUwTztdxBe7GcM").unwrap();
 
     let mut original_multisig = Multisig::new(2);
     original_multisig.add_cosigner(cosigner1);
@@ -621,6 +669,50 @@ mod tests {
     assert_eq!(address.address_type().unwrap(), AddressType::P2wpkh);
   }
 
+  #[test]
+  fn test_cosigner_from_str_for_full_xpub() {
+    let cosigner =
+      Cosigner::from_str("[0CDB4EE2/48'/0'/0'/2']Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui/1/*").unwrap();
+      
+    assert_eq!(
+      cosigner.xfp,
+      Some(String::from("0cdb4ee2"))
+    );
+    assert_eq!(
+      cosigner.derivation_path,
+      Some(String::from("m/48'/0'/0'/2'"))
+    );
+    assert_eq!(
+      cosigner.xpub,
+      "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
+    );
+  }
+
+  #[test]
+  fn test_cosigner_from_str_for_xpub() {
+    let cosigner =
+      Cosigner::from_str("Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui").unwrap();
+      
+    assert_eq!(
+      cosigner.xfp,
+      None
+    );
+    assert_eq!(
+      cosigner.derivation_path,
+      None
+    );
+    assert_eq!(
+      cosigner.xpub,
+      "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "invalid xpub format, xpub")]
+  fn test_cosigner_from_str_should_fail_for_invalid_xpub() {
+      Cosigner::from_str("[asd]Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui").unwrap();
+  }
+
   fn assert_multisig(ms1: &mut Multisig, ms2: &mut Multisig) {
     assert_eq!(ms1.threshold, ms2.threshold);
     assert_cosigners(&mut ms1.cosigners, &mut ms2.cosigners);
@@ -642,5 +734,85 @@ mod tests {
       assert!(rcs2.is_some(), "Cosigner not found: {:?}", cs1);
       assert_eq!(cs1, rcs2.unwrap());
     }
+  }
+
+  #[test]
+  fn test_cosigner_try_from_cosigner_shadow_for_xpub_with_full_xpub() {
+    let shadow = CosignerShadow {
+      xfp: None,
+      xpub: String::from("[0CDB4EE2/48'/0'/0'/2']Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui/1/*"),
+      derivation_path: None
+    };
+    let cosigner = Cosigner::try_from(shadow).unwrap();
+      
+    assert_eq!(
+      cosigner.xfp,
+      Some(String::from("0cdb4ee2"))
+    );
+    assert_eq!(
+      cosigner.derivation_path,
+      Some(String::from("m/48'/0'/0'/2'"))
+    );
+    assert_eq!(
+      cosigner.xpub,
+      "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
+    );
+  }
+
+  #[test]
+  fn test_cosigner_try_from_cosigner_shadow_for_xpub_with_xpub() {
+    let shadow = CosignerShadow {
+      xfp: None,
+      xpub: String::from("Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"),
+      derivation_path: None
+    };
+    let cosigner = Cosigner::try_from(shadow).unwrap();
+      
+    assert_eq!(
+      cosigner.xfp,
+      None
+    );
+    assert_eq!(
+      cosigner.derivation_path,
+      None
+    );
+    assert_eq!(
+      cosigner.xpub,
+      "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
+    );
+  }
+
+  #[test]
+  fn test_cosigner_try_from_cosigner_shadow_for_all_properties_set() {
+    let shadow = CosignerShadow {
+      xfp: Some(String::from("0CDB4EE2")),
+      xpub: String::from("Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"),
+      derivation_path: Some(String::from("m/48'/0'/0'/2'"))
+    };
+    let cosigner = Cosigner::try_from(shadow).unwrap();
+      
+    assert_eq!(
+      cosigner.xfp,
+      Some(String::from("0cdb4ee2"))
+    );
+    assert_eq!(
+      cosigner.derivation_path,
+      Some(String::from("m/48'/0'/0'/2'"))
+    );
+    assert_eq!(
+      cosigner.xpub,
+      "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
+    );
+  }
+
+  #[test]
+  #[should_panic(expected = "invalid xpub format, xpub")]
+  fn test_cosigner_try_from_cosigner_shadow_should_fail_for_invalid_xpub() {
+    let shadow = CosignerShadow {
+      xfp: None,
+      xpub: String::from("[asda]Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"),
+      derivation_path: None
+    };
+    Cosigner::try_from(shadow).unwrap();
   }
 }
