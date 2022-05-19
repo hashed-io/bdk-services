@@ -2,7 +2,7 @@ name: BDK Services
 on:
   push:
     branches:
-    - dev
+    - develop
     - master
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:      
       - name: Set docker-image-name to test
-        if: endsWith(github.ref, '/dev')
+        if: endsWith(github.ref, '/develop')
         run: |
           echo "DOCKER_IMAGE_NAME=bdk-services-dev" >> $GITHUB_ENV
       - name: Set docker-image-name to prod
