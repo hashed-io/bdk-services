@@ -1,0 +1,12 @@
+version: '3.2'
+    
+services:
+  bdk-services:
+    command: bdk-services
+    ports:
+      - ${ROCKET_PORT}:${ROCKET_PORT}
+    environment:
+      - ROCKET_PORT
+      - ROCKET_NETWORK_URL
+      - ROCKET_NETWORK
+    restart: on-failure

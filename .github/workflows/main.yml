@@ -1,0 +1,32 @@
+name: BDK Services
+on:
+  push:
+    branches:
+    - develop
+    - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:      
+      - name: Set docker-image-name to test
+        if: endsWith(github.ref, '/develop')
+        run: |
+          echo "DOCKER_IMAGE_NAME=bdk-services-dev" >> $GITHUB_ENV
+      - name: Set docker-image-name to prod
+        if: endsWith(github.ref, '/master')
+        run: |
+          echo "DOCKER_IMAGE_NAME=bdk-services-prod" >> $GITHUB_ENV
+      - uses: actions/checkout@v1
+      - name: Docker login
+        run: docker login -u ${{ secrets.DOCKER_HUB_USER }} -p ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: Build
+        run: docker build -t $DOCKER_IMAGE_NAME .
+      - name: Tags
+        run: |
+          docker tag $DOCKER_IMAGE_NAME ${{ secrets.DOCKER_HUB_USER }}/$DOCKER_IMAGE_NAME:${{ github.sha }}
+          docker tag $DOCKER_IMAGE_NAME ${{ secrets.DOCKER_HUB_USER }}/$DOCKER_IMAGE_NAME:latest
+      - name: Push
+        run: |
+          docker push ${{ secrets.DOCKER_HUB_USER }}/$DOCKER_IMAGE_NAME:${{ github.sha }}
+          docker push ${{ secrets.DOCKER_HUB_USER }}/$DOCKER_IMAGE_NAME:latest

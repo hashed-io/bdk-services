@@ -1,111 +1,153 @@
-#![feature(proc_macro_hygiene, decl_macro)]
 #[macro_use]
 extern crate rocket;
 
-// use bdk::bitcoin;
-// use bdk::Wallet;
-// use bdk::database::MemoryDatabase;
-// use bdk::wallet::AddressIndex::New;
-// use bitcoin::Network;
-
-// #[derive(Deserialize)]
-// struct MultisigWallet>'r> {
-//     threshold: u32,
-//     xpubs: u32,
-// }
-
-use serde::Deserialize;
-use rocket_contrib::json::Json;
-
-// #[derive(FromForm)]
-// struct Task {
-//     complete: String,
-//     description: String,
-// }
-
-// #[post("/todo", data = "<task>")]
-// fn todo(task: Form<Task>) { 
-//     println!("{:?}", task.description);
-//     println!("{:?}", task.complete);
-// }
-
-
-// #[get("/gen_new_address/<descriptor>")]
-// fn gen_new_address(descriptor: &str) -> String {
-
-//     // create a new wallet from the descriptor string
-//     let wallet = Wallet::new(
-//         descriptor,
-//         // TODO: parameterize change_descriptor
-//         None,
-//         // TODO: parameterize testnet vs mainnet vs regtest
-//         Network::Testnet,
-//         MemoryDatabase::default(),
-//     ).unwrap();
-
-//     // TODO: this is always the "first" address; to get the "next" address,
-//     // we'll need to check to loop through addresses to check for an existing UTXO (bitcoin balance).
-//     // In order to check the balance, we'll need to connect to a bitcoin node.
-//     // The paramter to `get_address` is an `AddressIndex` - maybe this allows for a "next" option.
-//     let address = wallet.get_address(New).unwrap();
-
-//     // return the address as an http request
-//     address.to_string().into()
-// }
-
-
-// #[get("/gen_output_descriptor")]
-// fn gen_output_descriptor(_threshold: u32, _xpubs: [String; 15]) -> String {
-
-//     // input is a list of xpubs and the multisig threshold
-//     // output is the properly formatted output descriptor
-//     return String::from("")
-// }
-
-// #[get("/get_balance")]
-// fn get_balance(descriptor: &str) -> u32 {
-
-//     // get balance by querying the bitcoin node
-//     // return balance in sats
-
-//     return 0
-// }
-
-// #[get("/")]
-// fn index() -> &'static str {
-//     "Root service not implemented"
-// }
-
-// #![feature(proc_macro_hygiene, decl_macro)]
-
-// #[macro_use] use rocket::*;
-
-
-#[get("/echo/<echo>")]
-fn echo_fn(echo: String) -> String {
-    format!("{}", echo)
-}
+use bdk::bitcoin;
+use bdk_services::hbdk::{
+    errors::Error, Blockchain, Descriptors, Multisig, SignedTrx, Trx, Wallet,
+};
+use bitcoin::Network;
+use rocket::fairing::AdHoc;
+use rocket::serde::{json::Json, Deserialize};
+use rocket::State;
 
 #[derive(Deserialize)]
-struct MyParam {
-    value: String
+struct Config {
+    network_url: String,
+    network: Network,
 }
 
-#[post("/echo-post/<echo>")]
-fn echo_post(echo: String) -> String {
-    format!("{}", echo)
+/// Returns a new address for the provided output descriptor
+///
+/// # Arguments
+///
+/// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid descriptor
+#[post("/gen_new_address", data = "<descriptors>")]
+fn gen_new_address(
+    config: &State<Config>,
+    descriptors: Json<Descriptors>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
+    let address = wallet.get_new_address()?;
+    Ok(address.to_string())
 }
 
-#[post("/submit", format= "application/json", data = "<user_input>")]
-fn submit_task(user_input: Json<MyParam>) -> String {
-    format!("Your value: {:?}", user_input.value)
+/// Returns a Multisig object for the provided output descriptor
+///
+/// # Arguments
+///
+/// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid descriptor
+#[post("/get_multisig", data = "<descriptors>")]
+fn gen_multisig(
+    config: &State<Config>,
+    descriptors: Json<Descriptors>,
+) -> Result<Json<Multisig>, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
+    Ok(Json(wallet.get_multisig()?))
 }
 
-fn main() {
-    rocket::ignite().mount("/", routes![echo_fn, echo_post, submit_task]).launch();
+/// Returns a Descriptor object with the descriptor and change_descriptor fields set for the provided multisig
+///
+/// # Arguments
+///
+/// * `multisig` - A Multisig object, the cosigner xpub details can be provided in the separate fields or the
+/// full xpub can be provided in the xpub field, and it will be parsed to obtain the details
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid multisig
+#[post("/gen_output_descriptor", data = "<multisig>")]
+fn gen_output_descriptor(
+    config: &State<Config>,
+    multisig: Json<Multisig>,
+) -> Result<Json<Descriptors>, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig)?;
+    let descriptors = wallet.get_descriptors()?;
+    Ok(Json(descriptors))
 }
 
+/// Returns a psbt as a base64 encoded string for the provided Trx object
+///
+/// # Arguments
+///
+/// * `trx` - A Trx object with the output descriptor and trx details to use
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid trx
+#[post("/gen_psbt", data = "<trx>")]
+fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &trx.descriptors)?;
+    Ok(wallet.build_tx_encoded(&trx)?)
+}
 
-// fn main() {
-//     rocket::ignite().mount("/", routes![new]).launch();
-// }
+/// Finalizes and broadcasts a trx bsaed on the provided signed psbts, returns the trx ID in
+/// case of success
+///
+/// # Arguments
+///
+/// * `signed_trx` - A SignedTrx object with the output descriptor and signed psbts
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid signed trx object
+#[post("/finalize_trx", data = "<signed_trx>")]
+fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &signed_trx.descriptors)?;
+    Ok(wallet.finalize_trx(signed_trx.psbts.as_slice())?)
+}
+
+/// Returns balance in sats for the provided output descriptor
+///
+/// # Arguments
+///
+/// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid descriptor
+#[post("/get_balance", data = "<descriptors>")]
+fn get_balance(
+    config: &State<Config>,
+    descriptors: Json<Descriptors>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
+    let balance = wallet.get_balance()?;
+    Ok(balance.to_string())
+}
+
+#[get("/")]
+fn index() -> &'static str {
+    "Root service not implemented"
+}
+
+#[launch]
+fn rocket() -> _ {
+    rocket::build()
+        .mount(
+            "/",
+            routes![
+                index,
+                gen_output_descriptor,
+                gen_new_address,
+                gen_psbt,
+                finalize_trx,
+                gen_multisig,
+                get_balance
+            ],
+        )
+        .attach(AdHoc::config::<Config>())
+}
