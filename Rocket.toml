@@ -1,4 +1,5 @@
 [default]
+port = 8000
 network_url = "ssl://electrum.blockstream.info:60002"
 network = "testnet"
 
