@@ -11,6 +11,7 @@ use rocket::State;
 use rocket::http::Header;
 use rocket::{Request, Response};
 use rocket::fairing::{AdHoc, Fairing, Info, Kind};
+use std::path::PathBuf;
 
 #[derive(Deserialize)]
 struct Config {
@@ -36,6 +37,10 @@ impl Fairing for CORS {
         response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
     }
 }
+
+#[options("/<path..>")]
+fn options(path: PathBuf){}
+
 
 /// Returns a new address for the provided output descriptor
 ///
@@ -167,7 +172,8 @@ fn rocket() -> _ {
                 gen_psbt,
                 finalize_trx,
                 gen_multisig,
-                get_balance
+                get_balance,
+                options
             ],
         )
         .attach(AdHoc::config::<Config>())
