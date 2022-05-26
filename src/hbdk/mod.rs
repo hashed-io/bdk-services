@@ -3,22 +3,23 @@ pub mod util;
 
 use bdk::blockchain::{Blockchain as BlockchainTrait, ElectrumBlockchain};
 use bdk::database::MemoryDatabase;
-use bdk::descriptor::{Descriptor};
+use bdk::descriptor::Descriptor;
 use bdk::electrum_client::Client;
 use bdk::wallet::{AddressIndex, AddressInfo};
-use bdk::{FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
+use bdk::{BlockTime, FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
+use bitcoin::blockdata::{script::Script, transaction::OutPoint};
 use bitcoin::consensus;
-use bitcoin::util::address::{Address};
+use bitcoin::util::address::Address;
 use bitcoin::util::psbt::PartiallySignedTransaction;
-use bitcoin::{Network, Transaction};
+use bitcoin::{hash_types::Txid, Network, Transaction};
 use core::str::FromStr;
 use errors::Error;
+use lazy_static::lazy_static;
 use miniscript::descriptor::{DescriptorPublicKey, WshInner};
+use regex::Regex;
 use rocket::serde::{Deserialize, Serialize};
 use std::clone::Clone;
 use std::convert::TryFrom;
-use lazy_static::lazy_static;
-use regex::Regex;
 
 #[derive(Debug, Deserialize, Serialize, Hash)]
 #[serde(try_from = "CosignerShadow")]
@@ -46,9 +47,10 @@ impl Cosigner {
       s = format!("[{}/{}]", xfp, path);
     }
     if !util::is_multisig_xpub(&self.xpub) {
-      return Err(
-        Error::new(&format!("xpub is not a multisig xpub. xpub:{}", self.xpub)),
-      );
+      return Err(Error::new(&format!(
+        "xpub is not a multisig xpub. xpub:{}",
+        self.xpub
+      )));
     }
     Ok(format!(
       "{}{}{}",
@@ -61,8 +63,8 @@ impl Cosigner {
 
 impl TryFrom<CosignerShadow> for Cosigner {
   type Error = Error;
-  
-  fn try_from(shadow: CosignerShadow) -> Result<Self, Self::Error>{
+
+  fn try_from(shadow: CosignerShadow) -> Result<Self, Self::Error> {
     let mut cosigner = Cosigner::from_str(&shadow.xpub)?;
     if cosigner.xfp.is_none() {
       cosigner.xfp = shadow.xfp.map(|s| s.to_lowercase());
@@ -72,32 +74,32 @@ impl TryFrom<CosignerShadow> for Cosigner {
   }
 }
 
-impl FromStr for Cosigner{
+impl FromStr for Cosigner {
   type Err = Error;
-  
-  fn from_str(s : &str) -> Result<Self, Error> {
+
+  fn from_str(s: &str) -> Result<Self, Error> {
     lazy_static! {
       static ref XPUB_RE: Regex = Regex::new(r"^[a-zA-Z\d]{111,112}$").unwrap();
-      static ref FULL_XPUB_RE: Regex = Regex::new(r"^\[(?P<xfp>[a-zA-Z\d]{8})(?P<dp>(?:/\d*')+)\](?P<xpub>[a-zA-Z\d]{111,112})(?:/[\d\*]+)*$").unwrap();
+      static ref FULL_XPUB_RE: Regex = Regex::new(
+        r"^\[(?P<xfp>[a-zA-Z\d]{8})(?P<dp>(?:/\d*')+)\](?P<xpub>[a-zA-Z\d]{111,112})(?:/[\d\*]+)*$"
+      )
+      .unwrap();
     }
     if FULL_XPUB_RE.is_match(s) {
       let captures = FULL_XPUB_RE.captures(s).unwrap();
-      return Ok(
-        Cosigner {
-        xfp: Some(String::from(captures.name("xfp").unwrap().as_str().to_lowercase())),
+      return Ok(Cosigner {
+        xfp: Some(String::from(
+          captures.name("xfp").unwrap().as_str().to_lowercase(),
+        )),
         xpub: String::from(captures.name("xpub").unwrap().as_str()),
-        derivation_path: Some(format!("m{}",captures.name("dp").unwrap().as_str()))
-        }
-    );
-      
+        derivation_path: Some(format!("m{}", captures.name("dp").unwrap().as_str())),
+      });
     } else if XPUB_RE.is_match(s) {
-      return Ok(
-        Cosigner {
+      return Ok(Cosigner {
         xfp: None,
         xpub: String::from(s),
-        derivation_path: None
-        }
-      );
+        derivation_path: None,
+      });
     }
     Err(Error::new(&format!("invalid xpub format, xpub:{}", s)))
   }
@@ -197,6 +199,38 @@ pub struct Trx {
 pub struct SignedTrx {
   pub descriptors: Descriptors,
   pub psbts: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TrxDetails {
+  pub trx_id: Txid,
+  /// Received value (sats)
+  pub received: u64,
+  /// Sent value (sats)
+  pub sent: u64,
+  /// Fee value (sats) if available.
+  /// The availability of the fee depends on the backend. It's never `None` with an Electrum
+  /// Server backend, but it could be `None` with a Bitcoin RPC node without txindex that receive
+  /// funds while offline.
+  pub fee: Option<u64>,
+  /// If the transaction is confirmed, contains height and timestamp of the block containing the
+  /// transaction, unconfirmed transaction contains `None`.
+  pub confirmation_time: Option<BlockTime>,
+
+  pub inputs: Vec<TrxInput>,
+  pub outputs: Vec<TrxOutput>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TrxInput {
+  previous_output_trx: OutPoint,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TrxOutput {
+  value: u64,
+  script_pubkey: Script,
+  address: Option<Address>,
 }
 
 pub struct Blockchain {
@@ -303,6 +337,43 @@ impl<'a> Wallet<'a> {
     self.sync()?;
     let address = self.wallet.get_address(AddressIndex::LastUnused)?;
     Ok(address)
+  }
+
+  pub fn list_trxs(&self) -> Result<Vec<TrxDetails>, Error> {
+    self.sync()?;
+    let mut trxs: Vec<TrxDetails> = vec!();
+    let original_trxs = self.wallet.list_transactions(true)?;
+    for otrx in original_trxs {
+      let mut inputs: Vec<TrxInput> = vec!();
+      let mut outputs: Vec<TrxOutput> = vec!();
+      if let Some(rtrx) = otrx.transaction {
+        for input in rtrx.input {
+          inputs.push(TrxInput{
+            previous_output_trx: input.previous_output
+          });
+        }
+        for output in rtrx.output {
+          outputs.push(TrxOutput{
+            address: Address::from_script(&output.script_pubkey, self.blockchain.network),
+            script_pubkey: output.script_pubkey,
+            value: output.value,
+          });
+        }
+
+          // let addr = Address::from_script(&o.script_pubkey, self.blockchain.network).unwrap();
+          // println!("address output: {}", addr);
+        }
+        trxs.push(TrxDetails{
+          trx_id: otrx.txid,
+          received: otrx.received,
+          sent: otrx.sent,
+          fee: otrx.fee,
+          confirmation_time: otrx.confirmation_time,
+          inputs: inputs,
+          outputs: outputs,
+        });
+    }
+    Ok(trxs)
   }
 
   pub fn get_balance(&self) -> Result<u64, Error> {
@@ -673,11 +744,8 @@ mod tests {
   fn test_cosigner_from_str_for_full_xpub() {
     let cosigner =
       Cosigner::from_str("[0CDB4EE2/48'/0'/0'/2']Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui/1/*").unwrap();
-      
-    assert_eq!(
-      cosigner.xfp,
-      Some(String::from("0cdb4ee2"))
-    );
+
+    assert_eq!(cosigner.xfp, Some(String::from("0cdb4ee2")));
     assert_eq!(
       cosigner.derivation_path,
       Some(String::from("m/48'/0'/0'/2'"))
@@ -692,15 +760,9 @@ mod tests {
   fn test_cosigner_from_str_for_xpub() {
     let cosigner =
       Cosigner::from_str("Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui").unwrap();
-      
-    assert_eq!(
-      cosigner.xfp,
-      None
-    );
-    assert_eq!(
-      cosigner.derivation_path,
-      None
-    );
+
+    assert_eq!(cosigner.xfp, None);
+    assert_eq!(cosigner.derivation_path, None);
     assert_eq!(
       cosigner.xpub,
       "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
@@ -710,7 +772,7 @@ mod tests {
   #[test]
   #[should_panic(expected = "invalid xpub format, xpub")]
   fn test_cosigner_from_str_should_fail_for_invalid_xpub() {
-      Cosigner::from_str("[asd]Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui").unwrap();
+    Cosigner::from_str("[asd]Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui").unwrap();
   }
 
   fn assert_multisig(ms1: &mut Multisig, ms2: &mut Multisig) {
@@ -744,11 +806,8 @@ mod tests {
       derivation_path: None
     };
     let cosigner = Cosigner::try_from(shadow).unwrap();
-      
-    assert_eq!(
-      cosigner.xfp,
-      Some(String::from("0cdb4ee2"))
-    );
+
+    assert_eq!(cosigner.xfp, Some(String::from("0cdb4ee2")));
     assert_eq!(
       cosigner.derivation_path,
       Some(String::from("m/48'/0'/0'/2'"))
@@ -767,15 +826,9 @@ mod tests {
       derivation_path: None
     };
     let cosigner = Cosigner::try_from(shadow).unwrap();
-      
-    assert_eq!(
-      cosigner.xfp,
-      None
-    );
-    assert_eq!(
-      cosigner.derivation_path,
-      None
-    );
+
+    assert_eq!(cosigner.xfp, None);
+    assert_eq!(cosigner.derivation_path, None);
     assert_eq!(
       cosigner.xpub,
       "Zpub753WkfemgkpJqtboFVaoqHqBSVEQNgEdKmpRuMkNNabVv6ATumRRhNUdrnQopkgLnAxwZxzkh7rDvsCoEvBHuKuojKtSFfuroukMw9Kv1Ui"      
@@ -790,11 +843,8 @@ mod tests {
       derivation_path: Some(String::from("m/48'/0'/0'/2'"))
     };
     let cosigner = Cosigner::try_from(shadow).unwrap();
-      
-    assert_eq!(
-      cosigner.xfp,
-      Some(String::from("0cdb4ee2"))
-    );
+
+    assert_eq!(cosigner.xfp, Some(String::from("0cdb4ee2")));
     assert_eq!(
       cosigner.derivation_path,
       Some(String::from("m/48'/0'/0'/2'"))

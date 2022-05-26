@@ -1,9 +1,8 @@
 #[macro_use]
 extern crate rocket;
 
-use bdk::bitcoin;
 use bdk_services::hbdk::{
-    errors::Error, Blockchain, Descriptors, Multisig, SignedTrx, Trx, Wallet,
+    errors::Error, Blockchain, Descriptors, Multisig, SignedTrx, Trx, TrxDetails, Wallet,
 };
 use bitcoin::Network;
 use rocket::serde::{json::Json, Deserialize};
@@ -60,6 +59,26 @@ fn gen_new_address(
     let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     let address = wallet.get_new_address()?;
     Ok(address.to_string())
+}
+
+/// Returns a list of trxs for the provided output descriptors
+///
+/// # Arguments
+///
+/// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid descriptor
+#[post("/list_trxs", data = "<descriptors>")]
+fn list_trxs(
+    config: &State<Config>,
+    descriptors: Json<Descriptors>,
+) -> Result<Json<Vec<TrxDetails>>, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
+    let trxs = wallet.list_trxs()?;
+    Ok(Json(trxs))
 }
 
 /// Returns a Multisig object for the provided output descriptor
@@ -173,6 +192,7 @@ fn rocket() -> _ {
                 finalize_trx,
                 gen_multisig,
                 get_balance,
+                list_trxs,
                 options
             ],
         )
