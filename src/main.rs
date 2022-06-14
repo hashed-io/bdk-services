@@ -151,7 +151,7 @@ fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
 fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<String, Error> {
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &signed_trx.descriptors)?;
-    Ok(wallet.finalize_trx(signed_trx.psbts.as_slice())?)
+    Ok(wallet.finalize_trx(signed_trx.psbts.as_slice(), signed_trx.broadcast)?)
 }
 
 /// Returns balance in sats for the provided output descriptor

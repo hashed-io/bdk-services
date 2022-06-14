@@ -199,6 +199,7 @@ pub struct Trx {
 pub struct SignedTrx {
   pub descriptors: Descriptors,
   pub psbts: Vec<String>,
+  pub broadcast: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -407,7 +408,7 @@ impl<'a> Wallet<'a> {
     Ok(base64::encode(consensus::serialize(&psbt)))
   }
 
-  pub fn finalize_trx(&self, psbts: &[String]) -> Result<String, Error> {
+  pub fn finalize_trx(&self, psbts: &[String], broadcast: bool) -> Result<String, Error> {
     if psbts.len() < 2 {
       return Err(Error::new(&format!(
         "failed to finalized tx, there are less than required psbts, found: {}",
@@ -426,7 +427,9 @@ impl<'a> Wallet<'a> {
       return Err(Error::new("provided psbts do not finalize tx"));
     }
     let tx = combined.extract_tx();
-    self.blockchain.broadcast(&tx)?;
+    if broadcast {
+      self.blockchain.broadcast(&tx)?;
+    }
     Ok(tx.txid().to_string())
   }
 
