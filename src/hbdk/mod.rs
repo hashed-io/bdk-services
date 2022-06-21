@@ -409,7 +409,7 @@ impl<'a> Wallet<'a> {
   }
 
   pub fn finalize_trx(&self, psbts: &[String], broadcast: bool) -> Result<String, Error> {
-    if psbts.len() < 2 {
+    if psbts.len() < 1 {
       return Err(Error::new(&format!(
         "failed to finalized tx, there are less than required psbts, found: {}",
         psbts.len()
