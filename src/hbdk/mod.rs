@@ -398,7 +398,7 @@ impl<'a> Wallet<'a> {
         trx.amount,
       )
       .enable_rbf()
-      .do_not_spend_change()
+      // .do_not_spend_change()
       .fee_rate(FeeRate::from_sat_per_vb(trx.fee_sat_per_vb));
     Ok(builder.finish()?)
   }
@@ -417,7 +417,7 @@ impl<'a> Wallet<'a> {
     }
     let mut combined = self.deserialize_psbt(&psbts[0])?;
     for psbt in &psbts[1..] {
-      combined.merge(self.deserialize_psbt(psbt)?)?;
+      combined.combine(self.deserialize_psbt(psbt)?)?;
     }
     self.sync()?;
     let finalized = self
