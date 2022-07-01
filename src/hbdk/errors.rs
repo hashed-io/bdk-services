@@ -53,6 +53,31 @@ impl From<bdk::electrum_client::Error> for Error {
     }
 }
 
+
+impl From<miniscript::descriptor::ConversionError> for Error {
+    fn from(err: miniscript::descriptor::ConversionError) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<miniscript::descriptor::DescriptorKeyParseError> for Error {
+    fn from(err: miniscript::descriptor::DescriptorKeyParseError) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<miniscript::interpreter::Error> for Error {
+    fn from(err: miniscript::interpreter::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<bitcoin::util::bip32::Error> for Error {
+    fn from(err: bitcoin::util::bip32::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
 impl From<bitcoin_hashes::hex::Error> for Error {
     fn from(err: bitcoin_hashes::hex::Error) -> Self {
         Error::new(&err.to_string())

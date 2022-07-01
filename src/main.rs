@@ -2,7 +2,7 @@
 extern crate rocket;
 
 use bdk_services::hbdk::{
-    errors::Error, Blockchain, Descriptors, Multisig, SignedTrx, Trx, TrxDetails, Wallet,
+    errors::Error, Blockchain, Cosigner, Descriptors, Multisig, SignedTrx, Trx, TrxDetails, Wallet, VerifyPSBTPayload
 };
 use bitcoin::Network;
 use rocket::serde::{json::Json, Deserialize};
@@ -16,6 +16,7 @@ use std::path::PathBuf;
 struct Config {
     network_url: String,
     network: Network,
+    pub_key_search_radius: u8,
 }
 
 pub struct CORS;
@@ -79,6 +80,26 @@ fn list_trxs(
     let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     let trxs = wallet.list_trxs()?;
     Ok(Json(trxs))
+}
+
+/// Returns a list of xpubs who signed the psbt
+///
+/// # Arguments
+///
+/// * `verify_psbt_payload` - A VerifyPSBTPayload object with the descriptors and psbt fields set
+///
+/// # Errors
+/// 
+/// Returns 404 error in case of an invalid descriptors or psbt
+#[post("/list_signers", data = "<verify_psbt_payload>")]
+fn list_signers(
+    config: &State<Config>,
+    verify_psbt_payload: Json<VerifyPSBTPayload>,
+) -> Result<Json<Vec<Cosigner>>, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &verify_psbt_payload.descriptors)?;
+    let signers = wallet.get_signers(&verify_psbt_payload.psbt, config.pub_key_search_radius)?;
+    Ok(Json(signers))
 }
 
 /// Returns a Multisig object for the provided output descriptor
@@ -193,6 +214,7 @@ fn rocket() -> _ {
                 gen_multisig,
                 get_balance,
                 list_trxs,
+                list_signers,
                 options
             ],
         )

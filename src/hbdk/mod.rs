@@ -2,26 +2,25 @@ pub mod errors;
 pub mod util;
 
 use bdk::blockchain::{Blockchain as BlockchainTrait, ElectrumBlockchain};
-use bdk::database::MemoryDatabase;
+use bdk::database::{Database, MemoryDatabase};
 use bdk::descriptor::Descriptor;
 use bdk::electrum_client::Client;
 use bdk::wallet::{AddressIndex, AddressInfo};
 use bdk::{BlockTime, FeeRate, KeychainKind, SignOptions, SyncOptions, TransactionDetails};
 use bitcoin::blockdata::{script::Script, transaction::OutPoint};
-use bitcoin::consensus;
+use bitcoin::{consensus, psbt};
 use bitcoin::util::address::Address;
 use bitcoin::util::psbt::PartiallySignedTransaction;
-use bitcoin::{hash_types::Txid, Network, Transaction};
-use core::str::FromStr;
+use bitcoin::{hash_types::Txid, Network, Transaction, secp256k1::{All,Secp256k1}};
+use core::{ops::Deref, str::FromStr};
 use errors::Error;
 use lazy_static::lazy_static;
-use miniscript::descriptor::{DescriptorPublicKey, WshInner};
+use miniscript::{descriptor::{DescriptorPublicKey, WshInner}, interpreter::Interpreter};
 use regex::Regex;
 use rocket::serde::{Deserialize, Serialize};
-use std::clone::Clone;
-use std::convert::TryFrom;
+use std::{clone::Clone, collections::BTreeMap, convert::TryFrom};
 
-#[derive(Debug, Deserialize, Serialize, Hash)]
+#[derive(Debug, Deserialize, Serialize, Hash, Clone)]
 #[serde(try_from = "CosignerShadow")]
 pub struct Cosigner {
   pub xfp: Option<String>,
@@ -58,6 +57,17 @@ impl Cosigner {
       util::to_legacy_xpub(&self.xpub)?,
       child
     ))
+  }
+  pub fn public_key_descriptor(&self, change: bool)-> Result<DescriptorPublicKey, Error> {
+    Ok(DescriptorPublicKey::from_str(&self.descriptor(change)?)?)
+  }
+
+  pub fn xfp_is(&self, fp: &str) -> bool {
+    return if let Some(xfp) = &self.xfp {
+      fp.to_lowercase() == xfp.to_lowercase()
+    } else {
+      false
+    }
   }
 }
 
@@ -125,6 +135,47 @@ impl PartialEq for Cosigner {
 
 impl Eq for Cosigner {}
 
+pub struct CosignerFinder<'a> {
+  cosigners: Vec<&'a Cosigner>,
+  pub_key_cosigner_map: Option<BTreeMap<bitcoin::PublicKey, &'a Cosigner>>,
+  secp_ctx: &'a Secp256k1<All>,
+  start_idx: u32,
+  end_idx: u32,
+}
+
+impl <'a>CosignerFinder<'a> {
+  pub fn new(cosigners: &'a Vec<Cosigner>, start_idx: u32, end_idx: u32, secp_ctx: &'a Secp256k1<All>) -> Self {
+    assert!(start_idx < end_idx, "start_idx must be less than end_idx");
+    CosignerFinder{
+      cosigners: cosigners.iter().map(|cosigner| cosigner).collect(),
+      pub_key_cosigner_map: None,
+      secp_ctx,
+      start_idx,
+      end_idx,
+    }
+  } 
+  fn generate_pub_key_cosigner_map(&self) -> Result<BTreeMap<bitcoin::PublicKey, &'a Cosigner>, Error>{
+    let mut map = BTreeMap::new();
+    for cosigner in &self.cosigners {
+      let xpub = cosigner.public_key_descriptor(true)?;
+      for i in self.start_idx..self.end_idx {
+        map.insert(xpub.clone().derive(i).derive_public_key(self.secp_ctx)?, cosigner.clone());
+      }
+    }
+    Ok(map)
+  }
+
+  pub fn find_by_public_key(&mut self, public_key: &bitcoin::PublicKey) -> Result<Option<&&'a Cosigner>, Error>{
+    if self.pub_key_cosigner_map.is_none() {
+      self.pub_key_cosigner_map = Some(self.generate_pub_key_cosigner_map()?);
+    }
+    let map = &self.pub_key_cosigner_map.as_ref().unwrap();
+    Ok(map.get(public_key))
+  }
+}
+
+
+
 #[derive(Deserialize, Serialize)]
 pub struct Multisig {
   pub threshold: u32,
@@ -163,6 +214,29 @@ impl Multisig {
       self.threshold, descriptor
     ))
   }
+
+  pub fn find_by_xfp(&self, xfp :&str) -> Option<&Cosigner>{
+    self.cosigners.iter().find(|cosigner| cosigner.xfp_is(xfp))
+  }
+
+
+  pub fn public_key_descriptors(&self, change: bool) -> Result<Vec<(&Cosigner, DescriptorPublicKey)>, Error> {
+    let mut xpubs = Vec::new();
+    for cosigner in &self.cosigners{
+      xpubs.push((cosigner, cosigner.public_key_descriptor(change)?));
+    }
+    Ok(xpubs)
+  }
+
+  pub fn cosigner_finder<'secp>(&'secp self, start_idx: u32, end_idx: u32, secp_ctx: &'secp Secp256k1<All>) -> CosignerFinder{
+   CosignerFinder::new(&self.cosigners, start_idx, end_idx, secp_ctx)
+  }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct VerifyPSBTPayload {
+  pub descriptors: Descriptors,
+  pub psbt: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -406,6 +480,94 @@ impl<'a> Wallet<'a> {
   pub fn build_tx_encoded(&self, trx: &Trx) -> Result<String, Error> {
     let (psbt, _) = self.build_tx(trx)?;
     Ok(base64::encode(consensus::serialize(&psbt)))
+  }
+
+  pub fn get_signers(&self, serialized_psbt: &str, search_radius: u8)->Result<Vec<Cosigner>, Error>{
+    let mut cosigners = Vec::new();
+    let psbt = self.deserialize_psbt(serialized_psbt)?;
+    let multisig = self.get_multisig()?;
+    for (i, input) in psbt.inputs.iter().enumerate() {
+      if !input.partial_sigs.is_empty() {
+        cosigners.append(&mut self.get_signers_from_partial_sigs(&input, &multisig)?);
+      } else if input.final_script_witness.is_some() {
+        cosigners.append(&mut self.get_signers_from_script_witness(&psbt, i, &multisig, search_radius)?);
+      }
+    }
+    Ok(cosigners)
+  }
+
+  fn get_signers_from_partial_sigs(&self, input: &psbt::Input, multisig: &Multisig) -> Result<Vec<Cosigner>, Error>{
+    let mut cosigners = Vec::new();
+    for (key, _) in input.partial_sigs.iter(){
+      let keysource = input.bip32_derivation.get(&key.inner).unwrap();
+      if let Some(cosigner) = multisig.find_by_xfp(&keysource.0.to_string()){
+        cosigners.push((*cosigner).clone());
+      } else {
+        return Err(Error::new(&format!(
+          "no cosigner found with finger print: {}",&keysource.0.to_string()
+        )))
+      }
+    }
+    Ok(cosigners)
+  }
+
+  fn get_signers_from_script_witness(&self, psbt: &PartiallySignedTransaction, input_index: usize, multisig: &Multisig, search_radius: u8) -> Result<Vec<Cosigner>, Error>{
+    self.sync()?;
+    let mut cosigners = Vec::new();
+    let index = self.get_last_derivation_index(KeychainKind::Internal)?.unwrap_or(0);
+    let start_idx = std::cmp::max(0, index as i32 - search_radius as i32) as u32;
+    let end_idx = index + search_radius as u32;
+    let interpreter = self.get_tx_interpreter(psbt, input_index)?;
+    let mut finder = multisig.cosigner_finder(start_idx, end_idx, self.wallet.secp_ctx());
+    for elem in interpreter.iter_assume_sigs() {
+      match elem.expect("no evaluation error") {
+        miniscript::interpreter::SatisfiedConstraint::PublicKey { key_sig } => {
+          let (key, _) = key_sig
+            .as_ecdsa()
+            .expect("expected ecdsa sig, found schnorr sig");
+            println!("Signed with:\n key: {}\n", key);
+            let cosigner = finder.find_by_public_key(&key)?.ok_or(Error::new(&format!(
+              "no cosigner found for public key: {}", key
+            )))?;
+            cosigners.push((*cosigner).clone());
+            
+        }
+        _ => {}
+      }
+    }
+    Ok(cosigners)
+  }
+
+  fn get_last_derivation_index(&self, keychain: KeychainKind) -> Result<Option<u32>, bdk::Error>{
+    self
+      .wallet
+      .database()
+      .deref()
+      .get_last_index(keychain)
+  }
+
+  fn get_tx_interpreter<'psbt>(&'psbt self, psbt: &'psbt PartiallySignedTransaction, input_index: usize)-> Result<Interpreter, Error>{
+    let script_sig = &psbt.unsigned_tx.input[input_index].script_sig;
+    let input = &psbt.inputs[input_index];
+    if let Some(witness_utxo) = &input.witness_utxo {
+      if let Some(script_witness) = &input.final_script_witness {
+        Ok(Interpreter::from_txdata(
+          &witness_utxo.script_pubkey,
+          &script_sig,
+          &script_witness,
+          0,
+          0,
+        )?)
+      } else {
+        Err(Error::new(&format!(
+          "failed to create the tx interpreter, final script witness not found"
+        )))
+      }
+    } else {
+      Err(Error::new(&format!(
+        "failed to create the tx interpreter, witness utxo not found"
+      )))
+    }
   }
 
   pub fn finalize_trx(&self, psbts: &[String], broadcast: bool) -> Result<String, Error> {
@@ -868,4 +1030,112 @@ mod tests {
     };
     Cosigner::try_from(shadow).unwrap();
   }
+
+  #[test]
+  fn test_wallet_get_signers_no_signers() {
+    
+    let multisig = get_test_multisig();
+    let blockchain = get_blockchain();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
+    let psbt = "cHNidP8BAIkBAAAAAfx15Ttmz6elm9LHqX2jVvqboFTMUrD3OVilRE0RH3HNAQAAAAD9////AhAnAAAAAAAAIgAgapL4iNK+iOvUjmi74v5KOdJq0+brS2MsQt8bZu/jvVy37QAAAAAAACIAIDGu4FBMXgV+irxy6Vz78NrpoH/ezv1eabyuP2wfZkIWAAAAAAABAOoCAAAAAAEBP6iqyBDPPxR5o7wsklupWR/BZ5huKtUVwLZusOOQqXoBAAAAAP7///8CqwsoMAAAAAAWABSESQw62sXLgOdVekMYn+qAywbPk0AZAQAAAAAAIgAgmvQof5tQQVQRoQxX6GSovQjs0nC5cuKt40qMf8DoDuUCRzBEAiAkJRaqNQ3sbtMc4klUmqVekYtPklFhARt6lheow5JaggIgF/toSoiQluyUS2D0nPZ0aiikrAjjVLkRDRPPZhdbeVsBIQPVQZS4ubQQ+Sao6+dX9Em/At/0S41/SGBpzvniCo8K4FTYIgABAStAGQEAAAAAACIAIJr0KH+bUEFUEaEMV+hkqL0I7NJwuXLireNKjH/A6A7lAQWLUyECud7M+qn/i4LyHa0YVFUTevc6HBCmEhIqgM5VUADJYuYhA0cI+7c8yLZFJUQmXcefoV2FihbENMR29W+DQjZX78krIQNm7ihjOrXbPXri3XycoPFJeq7IpFN3Mgx9prkdzwTx6CED9Yk2xtBbhmmpBzjCAlfHvo3Qn0Fe2a2fwpLoIaedVk9UriIGArnezPqp/4uC8h2tGFRVE3r3OhwQphISKoDOVVAAyWLmHDuDsJwwAACAAQAAgAAAAIACAACAAAAAAAAAAAAiBgNHCPu3PMi2RSVEJl3Hn6FdhYoWxDTEdvVvg0I2V+/JKxzAuCxoMAAAgAEAAIAAAACAAgAAgAAAAAAAAAAAIgYDZu4oYzq12z164t18nKDxSXquyKRTdzIMfaa5Hc8E8egcXmtqBjAAAIABAACAAAAAgAIAAIAAAAAAAAAAACIGA/WJNsbQW4ZpqQc4wgJXx76N0J9BXtmtn8KS6CGnnVZPHE+CvLcwAACAAQAAgAAAAIACAACAAAAAAAAAAAAAIgICXD7c7JLk/bC0MJD5zpgML2uL4wMMEFXORQ4sBQdVVm8cT4K8tzAAAIABAACAAAAAgAIAAIAAAAAAAQAAACICAxgGi4BP18ux5lOP52MQ9PRPfXgtCjPccC5HIDXRIy2qHF5ragYwAACAAQAAgAAAAIACAACAAAAAAAEAAAAiAgN426KdAJSbNAOC2kc14X1IALYhIcCcdfxOl79acZT8uxw7g7CcMAAAgAEAAIAAAACAAgAAgAAAAAABAAAAIgIDx+fgEf5c9OQxAAZtBX8RDspq6IGsaeMfTHJwPx5cC1AcwLgsaDAAAIABAACAAAAAgAIAAIAAAAAAAQAAAAAiAgJS9efszeiZDbV1CzOv45rPRR1jh1L3pHTzV9blwWUyLxw7g7CcMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAIgIClDkC1BrgHuuy1WcCHkOQH4KEKYZuo9swFPDX2G+euh0cT4K8tzAAAIABAACAAAAAgAIAAIABAAAAAAAAACICArDjjAJxyeaP5PDwo79XG7P9MN1J9lcgmDMxcCuVMujqHF5ragYwAACAAQAAgAAAAIACAACAAQAAAAAAAAAiAgNrInUs30ukm4ERBVHjsJQfGbYb1dnVy50tk/ym/hyUQBzAuCxoMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAAA==";
+    let search_radius = 5;
+    let cosigners = wallet.get_signers(psbt, search_radius).unwrap();
+    assert_eq!(cosigners.len(), 0);
+  }
+
+  #[test]
+  fn test_wallet_get_signers_1_signer() {
+    
+    let multisig = get_test_multisig();
+    let blockchain = get_blockchain();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
+    let psbt = "cHNidP8BAIkBAAAAAfx15Ttmz6elm9LHqX2jVvqboFTMUrD3OVilRE0RH3HNAQAAAAD9////AhAnAAAAAAAAIgAgapL4iNK+iOvUjmi74v5KOdJq0+brS2MsQt8bZu/jvVy37QAAAAAAACIAIDGu4FBMXgV+irxy6Vz78NrpoH/ezv1eabyuP2wfZkIWAAAAAAABAH0CAAAAAT+oqsgQzz8UeaO8LJJbqVkfwWeYbirVFcC2brDjkKl6AQAAAAD+////AqsLKDAAAAAAFgAUhEkMOtrFy4DnVXpDGJ/qgMsGz5NAGQEAAAAAACIAIJr0KH+bUEFUEaEMV+hkqL0I7NJwuXLireNKjH/A6A7lVNgiAAEBK0AZAQAAAAAAIgAgmvQof5tQQVQRoQxX6GSovQjs0nC5cuKt40qMf8DoDuUiAgNHCPu3PMi2RSVEJl3Hn6FdhYoWxDTEdvVvg0I2V+/JK0cwRAIgQevv55jDdhvw6pJAhjXknVP4JzISWX6RxjqjG3ACYGUCIDGoyjaEXMPEgCDnFti6dhClIHcHXzZpR20XPwDgOzXFAQEFi1MhArnezPqp/4uC8h2tGFRVE3r3OhwQphISKoDOVVAAyWLmIQNHCPu3PMi2RSVEJl3Hn6FdhYoWxDTEdvVvg0I2V+/JKyEDZu4oYzq12z164t18nKDxSXquyKRTdzIMfaa5Hc8E8eghA/WJNsbQW4ZpqQc4wgJXx76N0J9BXtmtn8KS6CGnnVZPVK4iBgK53sz6qf+LgvIdrRhUVRN69zocEKYSEiqAzlVQAMli5hw7g7CcMAAAgAEAAIAAAACAAgAAgAAAAAAAAAAAIgYDRwj7tzzItkUlRCZdx5+hXYWKFsQ0xHb1b4NCNlfvySscwLgsaDAAAIABAACAAAAAgAIAAIAAAAAAAAAAACIGA2buKGM6tds9euLdfJyg8Ul6rsikU3cyDH2muR3PBPHoHF5ragYwAACAAQAAgAAAAIACAACAAAAAAAAAAAAiBgP1iTbG0FuGaakHOMICV8e+jdCfQV7ZrZ/Ckughp51WTxxPgry3MAAAgAEAAIAAAACAAgAAgAAAAAAAAAAAACICAlw+3OyS5P2wtDCQ+c6YDC9ri+MDDBBVzkUOLAUHVVZvHE+CvLcwAACAAQAAgAAAAIACAACAAAAAAAEAAAAiAgMYBouAT9fLseZTj+djEPT0T314LQoz3HAuRyA10SMtqhxea2oGMAAAgAEAAIAAAACAAgAAgAAAAAABAAAAIgIDeNuinQCUmzQDgtpHNeF9SAC2ISHAnHX8Tpe/WnGU/LscO4OwnDAAAIABAACAAAAAgAIAAIAAAAAAAQAAACICA8fn4BH+XPTkMQAGbQV/EQ7KauiBrGnjH0xycD8eXAtQHMC4LGgwAACAAQAAgAAAAIACAACAAAAAAAEAAAAAIgICUvXn7M3omQ21dQszr+Oaz0UdY4dS96R081fW5cFlMi8cO4OwnDAAAIABAACAAAAAgAIAAIABAAAAAAAAACICApQ5AtQa4B7rstVnAh5DkB+ChCmGbqPbMBTw19hvnrodHE+CvLcwAACAAQAAgAAAAIACAACAAQAAAAAAAAAiAgKw44wCccnmj+Tw8KO/Vxuz/TDdSfZXIJgzMXArlTLo6hxea2oGMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAIgIDayJ1LN9LpJuBEQVR47CUHxm2G9XZ1cudLZP8pv4clEAcwLgsaDAAAIABAACAAAAAgAIAAIABAAAAAAAAAAA=";
+    let search_radius = 5;
+    let cosigners = wallet.get_signers(psbt, search_radius).unwrap();
+    assert_eq!(cosigners.len(), 1);
+    assert_eq!(cosigners[0], Cosigner{
+      xfp:Some("c0b82c68".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5knpWjcHt8uQ7xUWM9mDRWpKst81n7zzmtr2LDaH3GPHkMoVw41L3bDDSded6xioVcg7L3ozoiwfCEKPCVFoiiKy9yqkV6nejso8Puy7Mvf".to_string(),
+    });
+  }
+
+
+  #[test]
+  fn test_wallet_get_signers_2_signers() {
+    
+    let multisig = get_test_multisig();
+    let blockchain = get_blockchain();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
+    let psbt = "cHNidP8BAIkBAAAAAfx15Ttmz6elm9LHqX2jVvqboFTMUrD3OVilRE0RH3HNAQAAAAD9////AhAnAAAAAAAAIgAgapL4iNK+iOvUjmi74v5KOdJq0+brS2MsQt8bZu/jvVy37QAAAAAAACIAIDGu4FBMXgV+irxy6Vz78NrpoH/ezv1eabyuP2wfZkIWAAAAAAABAH0CAAAAAT+oqsgQzz8UeaO8LJJbqVkfwWeYbirVFcC2brDjkKl6AQAAAAD+////AqsLKDAAAAAAFgAUhEkMOtrFy4DnVXpDGJ/qgMsGz5NAGQEAAAAAACIAIJr0KH+bUEFUEaEMV+hkqL0I7NJwuXLireNKjH/A6A7lVNgiAAEBK0AZAQAAAAAAIgAgmvQof5tQQVQRoQxX6GSovQjs0nC5cuKt40qMf8DoDuUiAgNHCPu3PMi2RSVEJl3Hn6FdhYoWxDTEdvVvg0I2V+/JK0cwRAIgQevv55jDdhvw6pJAhjXknVP4JzISWX6RxjqjG3ACYGUCIDGoyjaEXMPEgCDnFti6dhClIHcHXzZpR20XPwDgOzXFASICA2buKGM6tds9euLdfJyg8Ul6rsikU3cyDH2muR3PBPHoRzBEAiB5X6ILUU7AG8PfY9V/Ql5uP/19BHPvDzqVmuueZvDM8gIgcxvLCwoBZQeaAIFzvwEluHbu50F+E2W6dol7uXH5Oo0BAQWLUyECud7M+qn/i4LyHa0YVFUTevc6HBCmEhIqgM5VUADJYuYhA0cI+7c8yLZFJUQmXcefoV2FihbENMR29W+DQjZX78krIQNm7ihjOrXbPXri3XycoPFJeq7IpFN3Mgx9prkdzwTx6CED9Yk2xtBbhmmpBzjCAlfHvo3Qn0Fe2a2fwpLoIaedVk9UriIGArnezPqp/4uC8h2tGFRVE3r3OhwQphISKoDOVVAAyWLmHDuDsJwwAACAAQAAgAAAAIACAACAAAAAAAAAAAAiBgNHCPu3PMi2RSVEJl3Hn6FdhYoWxDTEdvVvg0I2V+/JKxzAuCxoMAAAgAEAAIAAAACAAgAAgAAAAAAAAAAAIgYDZu4oYzq12z164t18nKDxSXquyKRTdzIMfaa5Hc8E8egcXmtqBjAAAIABAACAAAAAgAIAAIAAAAAAAAAAACIGA/WJNsbQW4ZpqQc4wgJXx76N0J9BXtmtn8KS6CGnnVZPHE+CvLcwAACAAQAAgAAAAIACAACAAAAAAAAAAAAAIgICXD7c7JLk/bC0MJD5zpgML2uL4wMMEFXORQ4sBQdVVm8cT4K8tzAAAIABAACAAAAAgAIAAIAAAAAAAQAAACICAxgGi4BP18ux5lOP52MQ9PRPfXgtCjPccC5HIDXRIy2qHF5ragYwAACAAQAAgAAAAIACAACAAAAAAAEAAAAiAgN426KdAJSbNAOC2kc14X1IALYhIcCcdfxOl79acZT8uxw7g7CcMAAAgAEAAIAAAACAAgAAgAAAAAABAAAAIgIDx+fgEf5c9OQxAAZtBX8RDspq6IGsaeMfTHJwPx5cC1AcwLgsaDAAAIABAACAAAAAgAIAAIAAAAAAAQAAAAAiAgJS9efszeiZDbV1CzOv45rPRR1jh1L3pHTzV9blwWUyLxw7g7CcMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAIgIClDkC1BrgHuuy1WcCHkOQH4KEKYZuo9swFPDX2G+euh0cT4K8tzAAAIABAACAAAAAgAIAAIABAAAAAAAAACICArDjjAJxyeaP5PDwo79XG7P9MN1J9lcgmDMxcCuVMujqHF5ragYwAACAAQAAgAAAAIACAACAAQAAAAAAAAAiAgNrInUs30ukm4ERBVHjsJQfGbYb1dnVy50tk/ym/hyUQBzAuCxoMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAAA==";
+    let search_radius = 5;
+    let cosigners = wallet.get_signers(psbt, search_radius).unwrap();
+    assert_eq!(cosigners.len(), 2);
+    assert_eq!(cosigners[0], Cosigner{
+      xfp:Some("c0b82c68".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5knpWjcHt8uQ7xUWM9mDRWpKst81n7zzmtr2LDaH3GPHkMoVw41L3bDDSded6xioVcg7L3ozoiwfCEKPCVFoiiKy9yqkV6nejso8Puy7Mvf".to_string(),
+    });
+    assert_eq!(cosigners[1], Cosigner{
+      xfp:Some("5e6b6a06".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5mU6P8gQgQbHZWUuLexLgEjRt1WnW1KJscQSuDG9W9HbCHgTimuRG4k6ykX52HYH1uqmp832QypyKwqHkc3gVmQWoZmbXWGrYXyPS2SqHJZ".to_string(),
+    });
+  }
+
+  #[test]
+  #[should_panic(expected = "no cosigner found with finger print")]
+  fn test_wallet_get_signers_should_fail_for_signer_not_found_in_cosigners() {
+    let multisig = get_test_multisig();
+    let blockchain = get_blockchain();
+    let wallet = Wallet::from_multisig(&blockchain, &multisig).unwrap();
+    let psbt = "cHNidP8BAH0BAAAAATu0VKInpjK6eFMaQAFunA3A+97jPjpWNZMcnccgbYoKAAAAAAD9////AigjAAAAAAAAFgAU644owvunvN0djfQv0x5LcEiio6iKzwAAAAAAACIAINkzVKLuqXXoM2JecLoKX3wTeO6uaLlPJsbi5mwkVz0wAAAAAAABAP1lAQEAAAAAAQE15cLrKDCX1vMnOWvNFP8hDTHLFmJQ9i8AmgPKVo+7ygAAAAAA/f///wI79gAAAAAAACIAIFmq2KP+sPGRXMuV0a6osWkFyavpWxVY1ntadmhNcOusECcAAAAAAAAiACBrVZTHqoRBO0A6nn7Ao3t+megE/OELlG9ac49wzSjWNwQARzBEAiADdX44UYMWWxiTV4D4KTZBsnVVNyPoPaA54V0/y/Xi2AIgP6e+myoLB9IKIuOh/1UHis+7nUD/fHRf78aWFFACg1QBRzBEAiBA8AwwW71HvR4k9p3M/Jg4/9KxQUFDVaE/4vDN2z10SQIgAZQt6cZpSkd8VMRCBw3R6DwoWJPs97817oSiz+u6GdoBR1IhAlSfGcs3T+fKul2/pLHdc1bcPl5YMhVt/ju3qZZCvs7LIQPaX07glZnKOZPognhq6J7tD4amJrnC0zfX4MOTfsPse1KuAAAAACICAigcEWvhkrprJLufO8bCAvkqDMhUa8iTQ7aiwqT6ubc4RzBEAiBahqxx/ujI2XaIZth3P5n48he7kbrL7atIVgGmDE2IIgIgcxvUi29488IxIYvbB0z6xj1qa2YyL/TV4QAOMaLVpLcBAQVHUiECKBwRa+GSumsku587xsIC+SoMyFRryJNDtqLCpPq5tzghA5D7+vnb18WzTEh/VZ8RsWEmKYQXGZ+q2x/Afdz02vneUq4iBgIoHBFr4ZK6ayS7nzvGwgL5KgzIVGvIk0O2osKk+rm3OBD3w4rRAQAAgAEAAAABAAAAIgYDkPv6+dvXxbNMSH9VnxGxYSYphBcZn6rbH8B93PTa+d4Q6vi1bwEAAIABAAAAAQAAAAAAAQFHUiECQiTXOO7VU+8GV6lQWlRwidB4tapVE/cqCW36G0PgRHwhA9INPKlYclyE+qE4tNQmf/Jw00Z3rf79NCU4xaIxe8GaUq4iAgJCJNc47tVT7wZXqVBaVHCJ0Hi1qlUT9yoJbfobQ+BEfBD3w4rRAQAAgAEAAAAEAAAAIgID0g08qVhyXIT6oTi01CZ/8nDTRnet/v00JTjFojF7wZoQ6vi1bwEAAIABAAAABAAAAAA=";
+    let search_radius = 5;
+    wallet.get_signers(psbt, search_radius).unwrap();
+  }
+
+  fn get_test_multisig() -> Multisig {
+    let cosigner1 = Cosigner{
+      xfp:Some("c0b82c68".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5knpWjcHt8uQ7xUWM9mDRWpKst81n7zzmtr2LDaH3GPHkMoVw41L3bDDSded6xioVcg7L3ozoiwfCEKPCVFoiiKy9yqkV6nejso8Puy7Mvf".to_string(),
+    };
+
+    let cosigner2 = Cosigner{
+      xfp:Some("5e6b6a06".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5mU6P8gQgQbHZWUuLexLgEjRt1WnW1KJscQSuDG9W9HbCHgTimuRG4k6ykX52HYH1uqmp832QypyKwqHkc3gVmQWoZmbXWGrYXyPS2SqHJZ".to_string(),
+    };
+
+    let cosigner3 = Cosigner{
+      xfp:Some("4f82bcb7".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5kyc22JJ36vUUs5LJzSNAqToEYkDhxXHnCK4n7EsYHv5QCcZkyNGL8f3k8pLdgJGT7iboaTwf6mfhmnkCpqF5YZQisNsbGmemzPGzMZCvbC".to_string(),
+    };
+
+    let cosigner4 = Cosigner{
+      xfp:Some("3b83b09c".to_string()),
+      derivation_path: Some("m/48'/1'/0'/2'".to_string()),
+      xpub: "Vpub5nNXHiWYY8Q19GXv7bpcvHEbDbRQui6H3kNSdFoimEZNtcT7uK7MSqpS4MdHF5BJATzCeyjrRdy4asZXghd4VgRoWo4kyuf4k6cUhtVrKQV".to_string(),
+    };
+    let mut multisig = Multisig::new(3);
+    multisig.add_cosigner(cosigner1);
+    multisig.add_cosigner(cosigner2);
+    multisig.add_cosigner(cosigner3);
+    multisig.add_cosigner(cosigner4);
+    
+    multisig
+    
+  }
+
+  fn get_blockchain() -> Blockchain {
+    
+    Blockchain::new(
+      "ssl://electrum.blockstream.info:60002",
+      bitcoin::Network::Testnet,
+    )
+    .unwrap()
+    
+  }
+
 }
