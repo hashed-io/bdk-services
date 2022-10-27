@@ -4,6 +4,10 @@
 ```
 cargo run
 ```
+### Run Tests 
+```
+cargo test
+```
 ### Generate Output Descriptors
 Generate the output descriptors for a multisig wallet, which is a json object with the threshold and the cosigners. 
 
