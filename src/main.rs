@@ -38,8 +38,8 @@ impl Fairing for CORS {
     }
 }
 
-#[options("/<path..>")]
-fn options(path: PathBuf){}
+#[options("/<_path..>")]
+fn options(_path: PathBuf){}
 
 
 /// Returns a new address for the provided output descriptor
