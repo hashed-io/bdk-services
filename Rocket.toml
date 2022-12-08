@@ -3,6 +3,7 @@ port = 8000
 network_url = "ssl://electrum.blockstream.info:60002"
 network = "testnet"
 pub_key_search_radius = 5
+log_level = 'normal'
 
 [release]
 network_url = "ssl://electrum.blockstream.info:50002"
