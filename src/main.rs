@@ -2,14 +2,16 @@
 extern crate rocket;
 
 use bdk_services::hbdk::{
-    errors::Error, Blockchain, Cosigner, Descriptors, Multisig, SignedTrx, Trx, TrxDetails, Wallet, VerifyPSBTPayload
+    errors::Error, Blockchain, Cosigner, Descriptors, Multisig, SignedTrx, Trx, TrxDetails,
+    VerifyPSBTPayload, Wallet,
 };
+use bdk_services::hbdk::{ProofOfReserves, ProofOfReservesRequest, SignedProofOfReserves};
 use bitcoin::Network;
+use rocket::fairing::{AdHoc, Fairing, Info, Kind};
+use rocket::http::Header;
 use rocket::serde::{json::Json, Deserialize};
 use rocket::State;
-use rocket::http::Header;
 use rocket::{Request, Response};
-use rocket::fairing::{AdHoc, Fairing, Info, Kind};
 use std::path::PathBuf;
 
 #[derive(Deserialize)]
@@ -26,21 +28,23 @@ impl Fairing for CORS {
     fn info(&self) -> Info {
         Info {
             name: "Add CORS headers to responses",
-            kind: Kind::Response
+            kind: Kind::Response,
         }
     }
 
     async fn on_response<'r>(&self, _request: &'r Request<'_>, response: &mut Response<'r>) {
         response.set_header(Header::new("Access-Control-Allow-Origin", "*"));
-        response.set_header(Header::new("Access-Control-Allow-Methods", "POST, GET, PATCH, OPTIONS"));
+        response.set_header(Header::new(
+            "Access-Control-Allow-Methods",
+            "POST, GET, PATCH, OPTIONS",
+        ));
         response.set_header(Header::new("Access-Control-Allow-Headers", "*"));
         response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
     }
 }
 
 #[options("/<path..>")]
-fn options(path: PathBuf){}
-
+fn options(path: PathBuf) {}
 
 /// Returns a new address for the provided output descriptor
 ///
@@ -49,7 +53,7 @@ fn options(path: PathBuf){}
 /// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid descriptor
 #[post("/gen_new_address", data = "<descriptors>")]
 fn gen_new_address(
@@ -69,7 +73,7 @@ fn gen_new_address(
 /// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid descriptor
 #[post("/list_trxs", data = "<descriptors>")]
 fn list_trxs(
@@ -89,7 +93,7 @@ fn list_trxs(
 /// * `verify_psbt_payload` - A VerifyPSBTPayload object with the descriptors and psbt fields set
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid descriptors or psbt
 #[post("/list_signers", data = "<verify_psbt_payload>")]
 fn list_signers(
@@ -109,7 +113,7 @@ fn list_signers(
 /// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid descriptor
 #[post("/get_multisig", data = "<descriptors>")]
 fn gen_multisig(
@@ -129,7 +133,7 @@ fn gen_multisig(
 /// full xpub can be provided in the xpub field, and it will be parsed to obtain the details
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid multisig
 #[post("/gen_output_descriptor", data = "<multisig>")]
 fn gen_output_descriptor(
@@ -149,7 +153,7 @@ fn gen_output_descriptor(
 /// * `trx` - A Trx object with the output descriptor and trx details to use
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid trx
 #[post("/gen_psbt", data = "<trx>")]
 fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
@@ -158,7 +162,26 @@ fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
     Ok(wallet.build_tx_encoded(&trx)?)
 }
 
-/// Finalizes and broadcasts a trx bsaed on the provided signed psbts, returns the trx ID in
+/// Returns proof of reserves as a base64 encoded psbt string for the wallet described by the descriptors
+///
+/// # Arguments
+///
+/// * `proof_of_reserves_req` - A ProofOfReserves object with the output descriptor and message to use to generate the proof
+///
+/// # Errors
+///
+/// Returns 404 error in case of an invalid descriptors
+#[post("/create_proof", data = "<proof_of_reserves_req>")]
+fn create_proof_of_reserves(
+    config: &State<Config>,
+    proof_of_reserves_req: Json<ProofOfReservesRequest>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &proof_of_reserves_req.descriptors)?;
+    Ok(wallet.create_proof_of_reserves_encoded(&proof_of_reserves_req.message)?)
+}
+
+/// Finalizes and broadcasts a trx based on the provided signed psbts, returns the trx ID in
 /// case of success
 ///
 /// # Arguments
@@ -166,13 +189,55 @@ fn gen_psbt(config: &State<Config>, trx: Json<Trx>) -> Result<String, Error> {
 /// * `signed_trx` - A SignedTrx object with the output descriptor and signed psbts
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid signed trx object
 #[post("/finalize_trx", data = "<signed_trx>")]
 fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<String, Error> {
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &signed_trx.descriptors)?;
     Ok(wallet.finalize_trx(signed_trx.psbts.as_slice(), signed_trx.broadcast)?)
+}
+
+/// Finalizes proof based on the provided signed psbts, returns the combined psbt in
+/// case of success
+///
+/// # Arguments
+///
+/// * `signed_proof` - A SignedProofOfReserves object with the output descriptor and signed psbts
+///
+/// # Errors
+///
+/// Returns 404 error in case of an invalid signed proof of reserves object
+#[post("/finalize_proof", data = "<signed_proof>")]
+fn finalize_proof_of_reserves(
+    config: &State<Config>,
+    signed_proof: Json<SignedProofOfReserves>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &signed_proof.descriptors)?;
+    Ok(wallet.finalize_proof_of_reserves(signed_proof.psbts.as_slice())?)
+}
+
+/// Verify proof of reserves
+///
+///
+/// # Arguments
+///
+/// * `proof_of_reserves` - A ProofOfReverse object with the output descriptor, finalized psbt and message
+///
+/// # Errors
+///
+/// Returns 404 error in case of an invalid signed proof of reserves object
+#[post("/verify_proof", data = "<proof_of_reserves>")]
+fn verify_proof_of_reserves(
+    config: &State<Config>,
+    proof_of_reserves: Json<ProofOfReserves>,
+) -> Result<String, Error> {
+    let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
+    let wallet = Wallet::from_descriptors(&blockchain, &proof_of_reserves.descriptors)?;
+    Ok(wallet
+        .verify_proof_of_reserves(&proof_of_reserves.message, &proof_of_reserves.psbt)?
+        .to_string())
 }
 
 /// Returns balance in sats for the provided output descriptor
@@ -182,13 +247,10 @@ fn finalize_trx(config: &State<Config>, signed_trx: Json<SignedTrx>) -> Result<S
 /// * `descriptors` - A Descriptors object with the descriptor field set, the change descriptor is optional
 ///
 /// # Errors
-/// 
+///
 /// Returns 404 error in case of an invalid descriptor
 #[post("/get_balance", data = "<descriptors>")]
-fn get_balance(
-    config: &State<Config>,
-    descriptors: Json<Descriptors>,
-) -> Result<String, Error> {
+fn get_balance(config: &State<Config>, descriptors: Json<Descriptors>) -> Result<String, Error> {
     let blockchain = Blockchain::new(&config.network_url, config.network).unwrap();
     let wallet = Wallet::from_descriptors(&blockchain, &descriptors)?;
     let balance = wallet.get_balance()?;
@@ -215,6 +277,9 @@ fn rocket() -> _ {
                 get_balance,
                 list_trxs,
                 list_signers,
+                create_proof_of_reserves,
+                finalize_proof_of_reserves,
+                verify_proof_of_reserves,
                 options
             ],
         )

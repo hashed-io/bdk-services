@@ -1,4 +1,5 @@
 use bitcoin::consensus::encode;
+use bitcoin::locktime;
 use bitcoin::util::address;
 use bitcoin::util::psbt;
 use rocket::request::Request;
@@ -8,7 +9,6 @@ use rocket::serde::{json::Json, Serialize};
 use std::error;
 use std::fmt;
 use xyzpub;
-
 
 #[derive(Debug, Serialize)]
 pub struct Error {
@@ -52,7 +52,6 @@ impl From<bdk::electrum_client::Error> for Error {
         Error::new(&err.to_string())
     }
 }
-
 
 impl From<miniscript::descriptor::ConversionError> for Error {
     fn from(err: miniscript::descriptor::ConversionError) -> Self {
@@ -101,6 +100,29 @@ impl From<address::Error> for Error {
     }
 }
 
+impl From<locktime::Error> for Error {
+    fn from(err: locktime::Error) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<bdk::miniscript::descriptor::ConversionError> for Error {
+    fn from(err: bdk::miniscript::descriptor::ConversionError) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<bdk::miniscript::descriptor::DescriptorKeyParseError> for Error {
+    fn from(err: bdk::miniscript::descriptor::DescriptorKeyParseError) -> Self {
+        Error::new(&err.to_string())
+    }
+}
+
+impl From<bdk_reserves::reserves::ProofError> for Error {
+    fn from(err: bdk_reserves::reserves::ProofError) -> Self {
+        Error::new(&format!("ProofError: {:?}", err))
+    }
+}
 
 // impl From<Error> for Box<Error> {
 //   fn from(err: xyzpub::Error) -> Self {
