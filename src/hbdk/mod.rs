@@ -1207,6 +1207,21 @@ mod tests {
         wallet.get_signers(psbt, search_radius).unwrap();
     }
 
+    #[test]
+    fn test_wallet_get_balance_raw() {
+        let client = Client::new("ssl://electrum.blockstream.info:60002").unwrap();
+        let blockchain = ElectrumBlockchain::from(client);
+        let wallet = bdk::Wallet::new(
+            "wsh(sortedmulti(2,tpubD9zJG3Z4c9LLBCTeEcq64yFtVtfDHffWspDxKLY3apTbu4ocjFoD4vXz4XV2tfMAEQ8p9Km6CiEHBYqVhhG3qPPEcBZqPnwYuWx9RVmiVLz/0/*,tpubDA5kZcnunRMnATJYbo9ar5CR5zFCs5SsHmP69noNWEFwyhSPnCDmuwUND3qAvsqyBwUtm2BGurKz5nFvACpHkFzwvmupdsbznAFMNypghFB/0/*))#3xvsph9g",
+            Some("wsh(sortedmulti(2,tpubD9zJG3Z4c9LLBCTeEcq64yFtVtfDHffWspDxKLY3apTbu4ocjFoD4vXz4XV2tfMAEQ8p9Km6CiEHBYqVhhG3qPPEcBZqPnwYuWx9RVmiVLz/1/*,tpubDA5kZcnunRMnATJYbo9ar5CR5zFCs5SsHmP69noNWEFwyhSPnCDmuwUND3qAvsqyBwUtm2BGurKz5nFvACpHkFzwvmupdsbznAFMNypghFB/1/*))#jxu9yn3m"),
+            Network::Testnet,
+            MemoryDatabase::default(),
+        ).unwrap();
+        wallet.sync(&blockchain, SyncOptions::default()).unwrap();
+        let balance = wallet.get_balance();
+        println!("Balance: {:?}", balance);
+    }
+
     fn get_test_multisig() -> Multisig {
         let cosigner1 = Cosigner{
       xfp:Some("c0b82c68".to_string()),
