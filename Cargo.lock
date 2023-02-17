@@ -92,9 +92,9 @@ checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
 name = "bdk"
-version = "0.24.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c50e3f08fbcd7eb34f11e066a1353986d583f1f87af70f7cd50bff9fce97c817"
+checksum = "b238a07736baee43ba9663933e44b1c6c27b43ef871b9486e175902335d83880"
 dependencies = [
  "async-trait",
  "bdk-macros",
@@ -124,9 +124,9 @@ dependencies = [
 
 [[package]]
 name = "bdk-reserves"
-version = "0.24.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2983085ed088608518d0b1610d4e5a79d4e7da26d0647c51e7f1bcfdc1a7f230"
+checksum = "43a55a60de63901b347c51f8cecc885edfecaad5de019bf49b4cb3175f6d8640"
 dependencies = [
  "bdk",
  "bitcoinconsensus",
